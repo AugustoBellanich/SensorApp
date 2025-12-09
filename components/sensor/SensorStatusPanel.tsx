@@ -5,46 +5,40 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Colors } from '../../constants/Colors';
 
 interface Props {
-  batteryMv: number; // Ej: 4150
+  batteryMv: number;
   soilTemp: number;
   status: { sd: boolean; lora: boolean; rtc: boolean; };
+  showSoilTemp?: boolean; // <--- NUEVA PROP OPCIONAL
 }
 
-export default function SensorStatusPanel({ batteryMv, soilTemp, status }: Props) {
+export default function SensorStatusPanel({ 
+  batteryMv, 
+  soilTemp, 
+  status, 
+  showSoilTemp = true // Por defecto se muestra (para B01)
+}: Props) {
   const insets = useSafeAreaInsets();
 
-  // 1. Lógica de Porcentaje de Batería (Estimación Lineal para Li-Ion)
-  // 4200mV = 100%, 3300mV = 0%
   const getBatPercentage = (mv: number) => {
     const min = 3300;
     const max = 4200;
     let pct = ((mv - min) / (max - min)) * 100;
-    
-    // Limitamos entre 0 y 100
     if (pct > 100) pct = 100;
     if (pct < 0) pct = 0;
-    
     return Math.round(pct);
   };
 
   const batPct = getBatPercentage(batteryMv);
 
-  // 2. Icono y Color Dinámico
   let batIcon = 'battery';
-  let batColor = Colors.success; // Verde por defecto
-
-  if (batPct < 20) { 
-    batIcon = 'battery-alert'; 
-    batColor = Colors.error;   // Rojo si < 20%
-  } else if (batPct < 50) { 
-    batIcon = 'battery-50'; 
-    batColor = Colors.warning; // Naranja si < 50%
-  }
+  let batColor = Colors.success;
+  if (batPct < 20) { batIcon = 'battery-alert'; batColor = Colors.error; } 
+  else if (batPct < 50) { batIcon = 'battery-50'; batColor = Colors.warning; }
 
   const StatusIcon = ({ name, active }: { name: any, active: boolean }) => (
     <MaterialCommunityIcons 
       name={name} 
-      size={22} // Aumenté un poco el tamaño del icono (era 20)
+      size={22} 
       color={active ? Colors.primary : Colors.textSecondary} 
       style={{ opacity: active ? 1 : 0.3, marginRight: 15 }} 
     />
@@ -52,8 +46,7 @@ export default function SensorStatusPanel({ batteryMv, soilTemp, status }: Props
 
   return (
     <View style={[styles.container, { paddingTop: insets.top + 15 }]}> 
-      {/* Aumenté el padding top extra (+15) para que sea más alto */}
-
+      
       {/* IZQUIERDA: Módulos */}
       <View style={styles.modulesRow}>
         <StatusIcon name="sd" active={status.sd} />
@@ -64,13 +57,15 @@ export default function SensorStatusPanel({ batteryMv, soilTemp, status }: Props
       {/* DERECHA: Datos */}
       <View style={styles.metricsRow}>
         
-        {/* Temperatura */}
-        <View style={styles.metricItem}>
-          <MaterialCommunityIcons name="thermometer" size={20} color={Colors.secondary} />
-          <Text style={styles.metricText}>{soilTemp.toFixed(1)}°C</Text>
-        </View>
+        {/* Temperatura (CONDICIONAL) */}
+        {showSoilTemp && (
+          <View style={styles.metricItem}>
+            <MaterialCommunityIcons name="thermometer" size={20} color={Colors.secondary} />
+            <Text style={styles.metricText}>{soilTemp.toFixed(1)}°C</Text>
+          </View>
+        )}
 
-        {/* Batería en % */}
+        {/* Batería */}
         <View style={styles.metricItem}>
           <MaterialCommunityIcons name={batIcon as any} size={20} color={batColor} />
           <Text style={[styles.metricText, { color: batColor }]}>
@@ -88,7 +83,6 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     alignItems: 'center',
     backgroundColor: '#fff',
-    // Aumenté el padding vertical para darle más cuerpo a la barra
     paddingBottom: 16, 
     paddingHorizontal: 20,
     borderBottomWidth: 1,
@@ -97,8 +91,7 @@ const styles = StyleSheet.create({
     zIndex: 10,
   },
   modulesRow: { flexDirection: 'row' },
-  metricsRow: { flexDirection: 'row', gap: 20 }, // Más separación entre temp y batería
+  metricsRow: { flexDirection: 'row', gap: 20 }, 
   metricItem: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  // Aumenté un puntito la fuente
   metricText: { fontWeight: 'bold', fontSize: 15, color: Colors.textPrimary },
 });
