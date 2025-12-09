@@ -44,16 +44,21 @@ export default function SensorDashboard() {
   const isClimateSensor = sensorIdStr.includes("C01");
   const data = isClimateSensor ? MOCK_C01_DATA : MOCK_B01_DATA;
 
+  // ESTADO DE CONEXIÓN (MOCK)
+  // false = Botón de descarga deshabilitado
+  // true = Botón de descarga habilitado
+  const isConnected = false; 
+
   return (
     <View style={styles.container}>
       <Stack.Screen options={{ headerShown: false }} />
 
-      {/* 1. Panel Superior (Sin Temp Suelo si es C01) */}
+      {/* 1. Panel Superior */}
       <SensorStatusPanel
         batteryMv={data.batteryMv}
         soilTemp={data.soilTemp}
         status={data.status}
-        showSoilTemp={!isClimateSensor} // <--- OCULTAR SI ES C01
+        showSoilTemp={!isClimateSensor}
       />
 
       {/* 2. Info Bar */}
@@ -68,10 +73,10 @@ export default function SensorDashboard() {
         style={styles.scrollView}
         contentContainerStyle={styles.scrollContent}
       >
+        {/* TARJETAS DE DATOS */}
         {isClimateSensor ? (
           // === VISTA C01 (En Fila) ===
           <View style={styles.rowContainer}>
-            {/* Usamos un View flexible para cada tarjeta */}
             <ClimateCard type="temp" value={MOCK_C01_DATA.climate.temp} />
             <ClimateCard type="hum" value={MOCK_C01_DATA.climate.hum} />
           </View>
@@ -97,27 +102,81 @@ export default function SensorDashboard() {
           </View>
         )}
 
-        {/* BOTÓN DESCARGA */}
-        <TouchableOpacity
-          style={styles.historyButton}
-          // LÓGICA DE NAVEGACIÓN CONDICIONAL
-          onPress={() => {
-            if (isClimateSensor) {
-              router.push(`/sensor/${sensorIdStr}/sd-data-climate`);
-            } else {
-              router.push(`/sensor/${sensorIdStr}/sd-data`);
-            }
-          }}
-        >
-          <MaterialCommunityIcons name="download" size={24} color="#fff" />
-          <Text style={styles.historyBtnTitle}>Descargar Datos</Text>
-          <MaterialCommunityIcons
-            name="chevron-right"
-            size={24}
-            color="rgba(255,255,255,0.6)"
-            style={{ marginLeft: "auto" }}
-          />
-        </TouchableOpacity>
+        {/* === ZONA DE ACCIONES === */}
+        <View style={{ marginTop: 20 }}>
+          
+          {/* 1. DESCARGAR DATOS (SD) - Requiere Conexión */}
+          <TouchableOpacity
+            style={[styles.actionButton, !isConnected && styles.btnDisabled]}
+            disabled={!isConnected}
+            onPress={() => {
+              if (isClimateSensor) {
+                router.push(`/sensor/${sensorIdStr}/sd-data-climate`);
+              } else {
+                router.push(`/sensor/${sensorIdStr}/sd-data`);
+              }
+            }}
+          >
+            <View
+              style={[
+                styles.iconCircle,
+                !isConnected && { backgroundColor: "#ccc" },
+              ]}
+            >
+              <MaterialCommunityIcons name="download" size={24} color="#fff" />
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text
+                style={[
+                  styles.btnTitle,
+                  !isConnected && { color: "#999" },
+                ]}
+              >
+                Descargar Tarjeta SD
+              </Text>
+              <Text style={styles.btnSub}>
+                {isConnected
+                  ? "Sincronizar nuevas lecturas"
+                  : "Sensor desconectado"}
+              </Text>
+            </View>
+            {isConnected && (
+              <MaterialCommunityIcons
+                name="chevron-right"
+                size={24}
+                color="#ccc"
+              />
+            )}
+          </TouchableOpacity>
+
+          {/* 2. VER DATOS GUARDADOS (LOCAL) - Siempre Disponible */}
+          <TouchableOpacity
+            style={[styles.actionButton, styles.btnLocal]}
+            onPress={() => router.push(`/sensor/${sensorIdStr}/local-data`)}
+          >
+            <View
+              style={[
+                styles.iconCircle,
+                { backgroundColor: Colors.secondary },
+              ]}
+            >
+              <MaterialCommunityIcons
+                name="database-search"
+                size={24}
+                color="#fff"
+              />
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.btnTitle}>Ver Datos Guardados</Text>
+              <Text style={styles.btnSub}>Consultar historial offline</Text>
+            </View>
+            <MaterialCommunityIcons
+              name="chevron-right"
+              size={24}
+              color="#ccc"
+            />
+          </TouchableOpacity>
+        </View>
 
         <View style={{ height: 40 }} />
       </ScrollView>
@@ -130,33 +189,40 @@ const styles = StyleSheet.create({
   scrollView: { flex: 1, backgroundColor: "#f2f2f2" },
   scrollContent: { padding: 12 },
 
-  // Estilo para fila
   rowContainer: {
-    flexDirection: "row", // Lado a lado
+    flexDirection: "row",
     justifyContent: "space-between",
-    gap: 4, // Pequeña separación extra si hace falta
+    gap: 4,
   },
 
-  historyButton: {
+  // ESTILOS BOTONES DE ACCIÓN
+  actionButton: {
     flexDirection: "row",
-    backgroundColor: Colors.primary,
-    paddingVertical: 14,
-    paddingHorizontal: 20,
-    borderRadius: 10,
     alignItems: "center",
-    marginTop: 15,
-    marginBottom: 10,
-    elevation: 3,
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.2,
-    shadowRadius: 3,
+    backgroundColor: "#fff",
+    padding: 12,
+    borderRadius: 12,
+    marginTop: 10,
+    elevation: 2,
+    borderWidth: 1,
+    borderColor: "#eee",
   },
-  historyBtnTitle: {
-    color: "#fff",
-    fontSize: 16,
-    fontWeight: "bold",
-    marginLeft: 12,
-    letterSpacing: 0.5,
+  btnLocal: { marginTop: 10 }, // Margen entre botones
+  btnDisabled: {
+    backgroundColor: "#f9f9f9",
+    elevation: 0,
+    borderColor: "#eee",
   },
+
+  iconCircle: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: Colors.primary,
+    justifyContent: "center",
+    alignItems: "center",
+    marginRight: 12,
+  },
+  btnTitle: { fontSize: 16, fontWeight: "bold", color: Colors.textPrimary },
+  btnSub: { fontSize: 12, color: Colors.textSecondary },
 });
