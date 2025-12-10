@@ -6,13 +6,13 @@ import { GlobalStyles } from '../../constants/GlobalStyles';
 
 interface Props {
   type: 'temp' | 'hum';
-  value: number;
+  value: number| null;
 }
 
 export default function ClimateCard({ type, value }: Props) {
   
   const config = type === 'temp' ? {
-    title: 'TEMP.',
+    title: 'TEMPERATURA',
     icon: 'thermometer',
     color: Colors.secondary,
     unit: '°C',
@@ -41,7 +41,7 @@ export default function ClimateCard({ type, value }: Props) {
       {/* BODY COMPACTO */}
       <View style={styles.body}>
         <Text style={[styles.value, { color: config.color }]}>
-          {value.toFixed(1)}
+          {value !== null ? value.toFixed(1) : "--"}
         </Text>
         <Text style={[styles.unit, { color: config.color }]}>
           {config.unit}

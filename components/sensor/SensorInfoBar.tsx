@@ -1,37 +1,41 @@
-import { MaterialCommunityIcons } from '@expo/vector-icons';
-import React from 'react';
-import { StyleSheet, Text, TouchableOpacity, View } from 'react-native';
-import { Colors } from '../../constants/Colors';
+import { MaterialCommunityIcons } from "@expo/vector-icons";
+import React from "react";
+import { StyleSheet, Text, TouchableOpacity, View } from "react-native";
+import { Colors } from "../../constants/Colors";
 
 interface Props {
   id: string;
-  alias?: string;
-  location?: string;
+  alias: string;
+  location: string;
   onEditPress: () => void;
+  isOffline?: boolean; // <--- NUEVA PROP
 }
 
-export default function SensorInfoBar({ id, alias, location, onEditPress }: Props) {
-  const cleanId = id.replace('SEN-', '');
-  const displayName = alias || `Sensor ${cleanId}`;
-  const displayLocation = location || 'Sin ubicación definida';
+export default function SensorInfoBar({ id, alias, location, onEditPress, isOffline = false }: Props) {
+  
+  const textColor = isOffline ? Colors.textSecondary : Colors.textPrimary;
+  const subTextColor = isOffline ? '#aaa' : Colors.textSecondary;
 
   return (
     <View style={styles.container}>
-      
-      {/* Icono Grande a la Izquierda */}
-      <View style={styles.iconContainer}>
-        <MaterialCommunityIcons name="map-marker-radius" size={28} color={Colors.primary} />
+      <View style={styles.infoCol}>
+        <View style={{flexDirection: 'row', alignItems: 'center'}}>
+            <Text style={[styles.alias, { color: textColor }]}>{alias}</Text>
+            {isOffline && (
+                <View style={styles.offlineBadge}>
+                    <Text style={styles.offlineText}>OFFLINE</Text>
+                </View>
+            )}
+        </View>
+        <View style={styles.row}>
+            <MaterialCommunityIcons name="map-marker" size={12} color={subTextColor} />
+            <Text style={[styles.subText, { color: subTextColor }]}> {location}</Text>
+            <Text style={[styles.subText, { color: subTextColor }]}> • ID: {id}</Text>
+        </View>
       </View>
 
-      <View style={{ flex: 1 }}>
-        <Text style={styles.alias} numberOfLines={1}>{displayName}</Text>
-        <Text style={styles.details}>
-          ID: <Text style={{fontFamily: 'monospace'}}>{cleanId}</Text> • {displayLocation}
-        </Text>
-      </View>
-      
-      <TouchableOpacity onPress={onEditPress} style={styles.editButton}>
-        <MaterialCommunityIcons name="cog" size={20} color={Colors.textSecondary} />
+      <TouchableOpacity onPress={onEditPress} style={styles.editBtn}>
+        <MaterialCommunityIcons name="pencil" size={20} color={Colors.primary} />
       </TouchableOpacity>
     </View>
   );
@@ -41,32 +45,20 @@ const styles = StyleSheet.create({
   container: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingVertical: 15, // Más alto
-    paddingHorizontal: 16,
-    backgroundColor: '#f4f6f8', 
+    paddingHorizontal: 20,
+    paddingVertical: 12,
+    backgroundColor: '#f8f9fa',
     borderBottomWidth: 1,
-    borderBottomColor: '#e0e0e0',
+    borderBottomColor: '#eee'
   },
-  iconContainer: {
-    marginRight: 12,
-    opacity: 0.8
+  infoCol: { flex: 1 },
+  alias: { fontSize: 18, fontWeight: 'bold', marginRight: 8 },
+  row: { flexDirection: 'row', alignItems: 'center', marginTop: 2 },
+  subText: { fontSize: 12 },
+  editBtn: { padding: 8 },
+  
+  offlineBadge: {
+      backgroundColor: '#eee', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4
   },
-  alias: { 
-    fontSize: 18, // Letra más grande
-    fontWeight: 'bold', 
-    color: Colors.textPrimary 
-  },
-  details: { 
-    fontSize: 13, 
-    color: Colors.textSecondary, 
-    marginTop: 2 
-  },
-  editButton: { 
-    padding: 8,
-    backgroundColor: '#fff',
-    borderRadius: 20,
-    borderWidth: 1,
-    borderColor: '#eee',
-    elevation: 1
-  },
+  offlineText: { fontSize: 10, fontWeight: 'bold', color: '#888' }
 });

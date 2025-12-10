@@ -9,9 +9,11 @@ interface Props {
   depthCm: number;
   volumetricMoisture: number;
   gravimetricMoisture?: number;
-  voltageMv: number;
+  voltageMv: number| string;
   isCalibrated: boolean;
+  disabled?: boolean;
   onCalibratePress: () => void;
+  
 }
 
 export default function ElectrodeCard({
