@@ -11,7 +11,6 @@ import {
 } from "react-native";
 import { Device } from "react-native-ble-plx";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-
 import { Colors } from "../../constants/Colors";
 import { useBle } from "../../context/BleContext";
 
@@ -24,7 +23,7 @@ interface SensorItem {
   name: string;       
   rssi: number | null; 
   isSaved: boolean;   
-  type: 'B01' | 'C01' | 'UNKNOWN'; 
+  type: 'B01' | 'C01' | 'N01' | 'UNKNOWN'; 
   device?: Device;    
 }
 
@@ -60,9 +59,11 @@ export default function HomeScreen() {
   const [displayList, setDisplayList] = useState<SensorItem[]>([]);
   const [savedSensors, setSavedSensors] = useState<SensorEntity[]>([]); 
 
-  const getSensorType = (id: string): 'B01' | 'C01' | 'UNKNOWN' => {
-    if (id.includes('B01')) return 'B01';
-    if (id.includes('C01')) return 'C01';
+  const getSensorType = (id: string): 'B01' | 'C01' | 'N01' | 'UNKNOWN' => {
+    const upperId = id.toUpperCase();
+    if (upperId.includes('B01')) return 'B01';
+    if (upperId.includes('C01')) return 'C01';
+    if (upperId.includes('N01')) return 'N01'; 
     return 'UNKNOWN';
   };
 
@@ -152,14 +153,25 @@ export default function HomeScreen() {
             // Si es nuevo, guardar en DB
             if (!item.isSaved) {
                 console.log("[Home] Guardando nuevo sensor en DB...");
+                
+                // Determinar el tipo para la DB (DB no debe tener 'UNKNOWN')
+                const dbType = item.type === 'UNKNOWN' ? 'B01' : item.type; // Asumir B01 por defecto
+
+                // --- CORRECCIÓN 2: Incluir propiedades de Sincronización ---
+                const now = new Date().toISOString();
+
                 const newSensor: SensorEntity = {
                     id: item.id,
                     alias: item.name,
-                    type: item.type === 'UNKNOWN' ? 'B01' : item.type,
+                    type: dbType, // Usamos el tipo determinado
                     location: 'Sin asignar',
                     activity: 'Activo',
                     config_json: '{}',
-                    last_sync: new Date().toISOString()
+                    last_sync: now,
+                    
+                    // PROPIEDADES DE SINCRONIZACIÓN (is_synced, updated_at)
+                    is_synced: 0, 
+                    updated_at: now, 
                 };
                 await saveSensor(newSensor);
                 await loadSensorsFromDB(); 
@@ -168,7 +180,7 @@ export default function HomeScreen() {
         } catch (error) {
             console.log("Error conectando:", error);
         }
-    } 
+    }
     else if (item.isSaved) {
         // OFFLINE
         router.push(`/sensor/${item.id}/dashboard`);
@@ -176,27 +188,42 @@ export default function HomeScreen() {
   };
 
   const renderItem = ({ item }: { item: SensorItem }) => {
-    const isSoil = item.type === 'B01';
+    // Determinar tipo y propiedades visuales
+    const type = item.type;
     const isOffline = item.rssi === null;
-    
+
+    // Mapeo de tipos a icono y colores/etiquetas
+    const typeMap: Record<string, { icon: string; bg: string; iconColor: string; label: string }> = {
+      B01: { icon: 'sprout', bg: '#e3f2fd', iconColor: Colors.primary, label: 'Sensor Suelo (B01)' },
+      C01: { icon: 'weather-partly-cloudy', bg: '#fff3e0', iconColor: Colors.secondary, label: 'Estación Climática (C01)' },
+      N01: { icon: 'router-wireless', bg: '#e8f5e9', iconColor: '#2e7d32', label: 'Gateway Antena (N01)' },
+      UNKNOWN: { icon: 'chip-outline', bg: '#f3f4f6', iconColor: Colors.textSecondary, label: 'Dispositivo' }
+    };
+
+    const meta = typeMap[type] || typeMap.UNKNOWN;
+
+    // Color de señal
     let signalColor = Colors.textSecondary;
-    if (!isOffline && item.rssi) {
-        if (item.rssi > -70) signalColor = Colors.success;
-        else if (item.rssi > -85) signalColor = Colors.warning;
-        else signalColor = Colors.error;
+    if (!isOffline && item.rssi != null) {
+      if (item.rssi > -70) signalColor = Colors.success;
+      else if (item.rssi > -85) signalColor = Colors.warning;
+      else signalColor = Colors.error;
     }
+
+    // Decide si la tarjeta está deshabilitada (mismo criterio que antes)
+    const disabled = ( !item.isSaved && isOffline ) || isBusy;
 
     return (
       <TouchableOpacity
         style={[styles.card, isOffline && styles.cardOffline]}
         onPress={() => handleConnectAction(item)}
-        disabled={(!item.isSaved && isOffline) || isBusy} 
+        disabled={disabled}
       >
-        <View style={[styles.iconBox, { backgroundColor: isSoil ? '#e3f2fd' : '#fff3e0' }]}>
+        <View style={[styles.iconBox, { backgroundColor: meta.bg }]}>
           <MaterialCommunityIcons
-            name={isSoil ? "sprout" : "weather-partly-cloudy"}
+            name={meta.icon as any}
             size={24}
-            color={isSoil ? Colors.primary : Colors.secondary}
+            color={meta.iconColor}
             style={{ opacity: isOffline ? 0.5 : 1 }}
           />
         </View>
@@ -207,7 +234,9 @@ export default function HomeScreen() {
             {item.isSaved && <MaterialCommunityIcons name="bookmark" size={14} color={Colors.primary} style={{marginLeft: 4}} />}
           </Text>
           <Text style={styles.subId}>{item.id}</Text>
-          
+
+          <Text style={{ fontSize: 12, color: Colors.textSecondary, marginTop: 2 }}>{meta.label}</Text>
+
           <View style={styles.signalRow}>
             {isOffline ? (
                 <Text style={styles.offlineText}>• Sin señal (Offline)</Text>

@@ -3,6 +3,15 @@ import React from 'react';
 import { StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { Colors } from '../../constants/Colors';
 
+const getSensorMeta = (rawId: string) => {
+  if (rawId.includes('B01')) return { type: 'Humedad de Suelo', icon: 'sprout', color: Colors.primary, iconBg: '#e3f2fd' };
+  if (rawId.includes('C01')) return { type: 'Clima Ambiental', icon: 'weather-partly-cloudy', color: Colors.secondary, iconBg: '#fff3e0' };
+  // AGREGADO N01
+  if (rawId.includes('N01')) return { type: 'Gateway / Enlace', icon: 'transit-connection-variant', color: Colors.success, iconBg: '#e8f5e9' };
+  
+  return { type: 'Sensor Genérico', icon: 'chip', color: Colors.textSecondary, iconBg: '#f2f2f2' };
+};
+
 interface SensorCardProps {
   id: string;
   rssi?: number | null;
@@ -11,11 +20,6 @@ interface SensorCardProps {
   onPress: () => void;
 }
 
-const getSensorMeta = (rawId: string) => {
-  if (rawId.includes('B01')) return { type: 'Humedad de Suelo', icon: 'water-percent', color: Colors.primary };
-  if (rawId.includes('C01')) return { type: 'Clima', icon: 'weather-partly-cloudy', color: Colors.secondary };
-  return { type: 'Sensor Genérico', icon: 'chip', color: Colors.textSecondary };
-};
 
 export default function SensorCard({ 
   id, 

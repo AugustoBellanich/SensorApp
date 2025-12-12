@@ -6,9 +6,9 @@ export const db = SQLite.openDatabaseSync('agrosense.db');
 export const initDatabase = async () => {
   try {
     // OPCIONAL: Descomenta esto si necesitas reiniciar la DB durante desarrollo
-    // await db.execAsync('DROP TABLE IF EXISTS sensors');
-    // await db.execAsync('DROP TABLE IF EXISTS readings_b01');
-    // await db.execAsync('DROP TABLE IF EXISTS readings_c01');
+    await db.execAsync('DROP TABLE IF EXISTS sensors');
+    await db.execAsync('DROP TABLE IF EXISTS readings_b01');
+    await db.execAsync('DROP TABLE IF EXISTS readings_c01');
 
     // 1. Tabla de SENSORES
     // Mapeo: 
