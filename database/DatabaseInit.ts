@@ -1,11 +1,20 @@
 import * as SQLite from 'expo-sqlite';
 
+// Abrir la base de datos de forma síncrona (nueva API de Expo SDK 50+)
 export const db = SQLite.openDatabaseSync('agrosense.db');
 
 export const initDatabase = async () => {
   try {
+    // OPCIONAL: Descomenta esto si necesitas reiniciar la DB durante desarrollo
+    // await db.execAsync('DROP TABLE IF EXISTS sensors');
+    // await db.execAsync('DROP TABLE IF EXISTS readings_b01');
+    // await db.execAsync('DROP TABLE IF EXISTS readings_c01');
+
     // 1. Tabla de SENSORES
-    // Agregamos 'activity'
+    // Mapeo: 
+    // local 'location' -> nube 'name_farm'
+    // local 'config_json' -> nube 'config' (jsonb)
+    // local 'is_synced', 'updated_at', 'deleted_at' -> Gestión offline
     await db.execAsync(`
       CREATE TABLE IF NOT EXISTS sensors (
         id TEXT PRIMARY KEY NOT NULL,
@@ -16,7 +25,12 @@ export const initDatabase = async () => {
         lat REAL,
         lng REAL,
         config_json TEXT, 
-        last_sync TEXT
+        last_sync TEXT,
+        
+        -- Columnas de Sincronización
+        is_synced INTEGER DEFAULT 0, -- 0: No subido, 1: Subido
+        updated_at TEXT,             -- Fecha de última modificación local
+        deleted_at TEXT              -- Fecha de borrado (si aplica)
       );
     `);
 
@@ -31,9 +45,14 @@ export const initDatabase = async () => {
         e2_mv REAL, e2_hv REAL, e2_hg REAL,
         e3_mv REAL, e3_hv REAL, e3_hg REAL,
         battery_mv REAL,
+        
+        -- Sync
+        is_synced INTEGER DEFAULT 0,
+        
         FOREIGN KEY (sensor_id) REFERENCES sensors (id)
       );
       CREATE INDEX IF NOT EXISTS idx_b01_sensor_time ON readings_b01 (sensor_id, timestamp);
+      CREATE INDEX IF NOT EXISTS idx_b01_synced ON readings_b01 (is_synced);
     `);
 
     // 3. Tabla de LECTURAS C01
@@ -45,11 +64,16 @@ export const initDatabase = async () => {
         air_temp REAL,
         humidity REAL,
         battery_mv REAL,
+        
+        -- Sync
+        is_synced INTEGER DEFAULT 0,
+
         FOREIGN KEY (sensor_id) REFERENCES sensors (id)
       );
+      CREATE INDEX IF NOT EXISTS idx_c01_synced ON readings_c01 (is_synced);
     `);
 
-    console.log("[DB] Tablas sincronizadas correctamente.");
+    console.log("[DB] Tablas inicializadas con soporte Offline-First.");
   } catch (error) {
     console.error("[DB] Error fatal iniciando BD:", error);
   }
