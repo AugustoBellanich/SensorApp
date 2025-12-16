@@ -83,27 +83,55 @@ export default function GatewayConfigScreen() {
         readDeviceConfig();
     }, [isConnected]); // Se ejecuta al conectar
 
-    // --- ACCIÓN 1: ACTUALIZAR WIFI ---
+// --- ACCIÓN 1: ACTUALIZAR WIFI (CORREGIDA) ---
     const handleUpdateWifi = async () => {
-        if (!wifiSsid || wifiSsid.length < 2) return Alert.alert("Error", "SSID inválido");
+        // 1. Limpiamos espacios accidentales (trim)
+        const cleanSsid = wifiSsid.trim();
+        const cleanPass = wifiPass.trim();
+
+        if (!cleanSsid || cleanSsid.length < 2) {
+            return Alert.alert("Error", "El nombre de la red (SSID) es inválido.");
+        }
+
         setIsWriting(true);
         try {
-            // Enviamos SSID
-            await connectedDevice?.writeCharacteristicWithResponseForService(
-                BLE_UUIDS.SVC_CONFIG, BLE_UUIDS.CONFIG.WIFI_SSID, 
-                Buffer.from(wifiSsid).toString("base64")
-            );
-            await sleep(300);
+            console.log("--- Iniciando Configuración WiFi ---");
+
+            // 2. ENVIAR PASSWORD PRIMERO
+            // Solo lo enviamos si el usuario escribió algo. Si lo deja vacío, mantenemos el viejo.
+            if (cleanPass.length > 0) {
+                console.log("Enviando Password...");
+                await connectedDevice?.writeCharacteristicWithResponseForService(
+                    BLE_UUIDS.SVC_CONFIG, 
+                    BLE_UUIDS.CONFIG.WIFI_PASS, 
+                    Buffer.from(cleanPass).toString("base64")
+                );
+                // Esperamos un poco más para asegurar que se guardó en Flash
+                await sleep(800);
+            } else {
+                console.log("Password vacío, se conserva el actual del dispositivo.");
+            }
             
-            // Enviamos Password (incluso si está vacío, para borrarla si es necesario)
+            // 3. ENVIAR SSID AL FINAL (El Gatillo)
+            // Esto suele disparar la reconexión en el firmware
+            console.log("Enviando SSID:", cleanSsid);
             await connectedDevice?.writeCharacteristicWithResponseForService(
-                BLE_UUIDS.SVC_CONFIG, BLE_UUIDS.CONFIG.WIFI_PASS, 
-                Buffer.from(wifiPass).toString("base64")
+                BLE_UUIDS.SVC_CONFIG, 
+                BLE_UUIDS.CONFIG.WIFI_SSID, 
+                Buffer.from(cleanSsid).toString("base64")
             );
             
-            Alert.alert("WiFi Actualizado", "Las nuevas credenciales WiFi se han enviado al Gateway.");
+            Alert.alert(
+                "Configuración Enviada", 
+                `El Gateway intentará conectarse a "${cleanSsid}".\n\nSi la luz del dispositivo cambia de Rojo a Verde (o muestra 'W' en pantalla), la conexión fue exitosa.`
+            );
+
+            // Limpiamos el campo pass por seguridad visual
+            setWifiPass(""); 
+
         } catch (e) {
-            Alert.alert("Error", "Fallo al actualizar WiFi.");
+            console.error("Error WiFi update:", e);
+            Alert.alert("Error de Comunicación", "No se pudo completar la configuración. Acércate más al dispositivo e intenta de nuevo.");
         } finally {
             setIsWriting(false);
         }

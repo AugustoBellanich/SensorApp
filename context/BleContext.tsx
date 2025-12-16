@@ -81,6 +81,7 @@ export interface DiagnosisStatus {
   wifiStatus?: string;
   syncStatus?: string;
   lastSync?: string;
+  sensorsList?: string;
 }
 
 interface BleContextType {
@@ -111,6 +112,7 @@ const INITIAL_DIAGNOSIS_STATUS: DiagnosisStatus = {
   wifiStatus: undefined,
   syncStatus: undefined,
   lastSync: undefined,
+  sensorsList: undefined,
 };
 
 // --- HELPERS DE DECODIFICACIÓN ---
@@ -319,6 +321,7 @@ export const BleProvider = ({ children }: { children: React.ReactNode }) => {
         // 3. Exclusivo Gateway: Leer WiFi y Sync (Datos pesados)
         let wifiStatus = undefined;
         let lastSync = undefined;
+        let sensorsList = undefined;
 
         if (category === "GATEWAY") {
           await sleep(200); // Pausa mayor antes de paquetes grandes
@@ -340,6 +343,16 @@ export const BleProvider = ({ children }: { children: React.ReactNode }) => {
             BLE_UUIDS.STATUS.LAST_SYNC
           );
           lastSync = base64ToUtf8(ls);
+
+          await sleep(150);
+
+          logTrace("DIAGNOSIS", "Leyendo Sensors List...");
+          const sl = await safeReadCharacteristic(
+            device.id,
+            BLE_UUIDS.SVC_STATUS,
+            BLE_UUIDS.STATUS.SENSORS_LIST
+          );
+          sensorsList = base64ToUtf8(sl);
         }
 
         // --- PROCESAMIENTO ---
@@ -370,6 +383,7 @@ export const BleProvider = ({ children }: { children: React.ReactNode }) => {
           wifiStatus,
           lastSync,
           syncStatus: "IDLE",
+          sensorsList,
         };
       } catch (error) {
         console.log("Error recuperable en diagnosis:", error);
@@ -498,6 +512,12 @@ export const BleProvider = ({ children }: { children: React.ReactNode }) => {
               char: BLE_UUIDS.STATUS.SYNC_STATUS,
               isBinary: false,
               isStatus: true,
+            },
+            {
+              service: BLE_UUIDS.SVC_STATUS,
+              char: BLE_UUIDS.STATUS.SENSORS_LIST,
+              isBinary: false,
+              isStatus: true,
             }
           );
           // Monitoreo de Sensores Locales (Gateway actuando como nodo)
@@ -537,6 +557,11 @@ export const BleProvider = ({ children }: { children: React.ReactNode }) => {
                   setDiagnosisStatus((prev) => ({
                     ...prev,
                     syncStatus: valStr,
+                  }));
+                } else if (char === BLE_UUIDS.STATUS.SENSORS_LIST) {
+                  setDiagnosisStatus((prev) => ({
+                    ...prev,
+                    sensorsList: valStr,
                   }));
                 }
               } else if (updateKey) {
