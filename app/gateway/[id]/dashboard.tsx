@@ -20,7 +20,7 @@ export default function GatewayDashboard() {
     const isConnected = !!connectedDevice;
     const [dbSensor, setDbSensor] = useState<SensorEntity | null>(null);
 
-    // Cargar datos de DB (para tener el alias aunque estemos desconectados)
+    // Cargar datos de DB
     useEffect(() => {
         const load = async () => {
             if (sensorIdStr) {
@@ -73,11 +73,13 @@ export default function GatewayDashboard() {
                 </View>
             </View>
 
+            {/* BARRA DE INFO (CORREGIDA LA RUTA) */}
             <SensorInfoBar
                 id={sensorIdStr}
                 alias={dbSensor?.alias || "Cargando..."}
                 location={dbSensor?.location || "Sin ubicación"}
-                onEditPress={() => router.push(`/sensor/${sensorIdStr}/info`)} 
+                // --- AQUÍ ESTABA EL ERROR, AHORA APUNTA A GATEWAY ---
+                onEditPress={() => router.push(`/gateway/${sensorIdStr}/info`)} 
                 isOffline={!isConnected}
             />
 
@@ -147,22 +149,22 @@ export default function GatewayDashboard() {
                     </TouchableOpacity>
                 </View>
 
-                {/* 3. SENSORES LOCALES (El N01 lee sus propios pines) */}
+                {/* 3. SENSORES LOCALES */}
                 <Text style={styles.sectionHeader}>Lecturas Locales</Text>
                 <View style={styles.sectionCard}>
-                     <View style={styles.readingRow}>
+                      <View style={styles.readingRow}>
                         <Text style={styles.readingLabel}>Temp. Suelo</Text>
                         <Text style={styles.readingValue}>
                             {isConnected && sensorData.soilTemp ? `${sensorData.soilTemp.toFixed(1)}°C` : '--'}
                         </Text>
-                     </View>
-                     <View style={[styles.divider]} />
-                     <View style={styles.readingRow}>
+                      </View>
+                      <View style={[styles.divider]} />
+                      <View style={styles.readingRow}>
                         <Text style={styles.readingLabel}>Humedad (Ref)</Text>
                         <Text style={styles.readingValue}>
                             {isConnected && sensorData.moisture1 ? `${sensorData.moisture1} mV` : '--'}
                         </Text>
-                     </View>
+                      </View>
                 </View>
 
             </ScrollView>
