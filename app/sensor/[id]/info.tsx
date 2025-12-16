@@ -243,7 +243,9 @@ export default function SensorInfoScreen() {
         lat: parseFloat(metadata.lat) || 0,
         lng: parseFloat(metadata.lng) || 0,
         config_json: JSON.stringify(config),
-        last_sync: new Date().toISOString()
+        last_sync: new Date().toISOString(),
+        is_synced: 0,
+        updated_at: ''
       };
 
       await saveSensor(updatedSensor);
@@ -341,7 +343,7 @@ export default function SensorInfoScreen() {
           options={['Información', 'Configuración']} 
           selectedIndex={activeTab} 
           onChange={setActiveTab} 
-          disabled={isWritingConfig} 
+          //disabled={isWritingConfig} 
         />
 
         <ScrollView 

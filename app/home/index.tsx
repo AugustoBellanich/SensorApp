@@ -18,12 +18,15 @@ import { useBle } from "../../context/BleContext";
 import { getAllSensors, saveSensor } from "../../database/SensorRepository";
 import { SensorEntity } from "../../database/types";
 
+// Tipos de Sensores Soportados
+type SensorModelType = 'B01' | 'C01' | 'N01' | 'UNKNOWN';
+
 interface SensorItem {
   id: string;         
   name: string;       
   rssi: number | null; 
   isSaved: boolean;   
-  type: 'B01' | 'C01' | 'N01' | 'UNKNOWN'; 
+  type: SensorModelType; 
   device?: Device;    
 }
 
@@ -59,11 +62,12 @@ export default function HomeScreen() {
   const [displayList, setDisplayList] = useState<SensorItem[]>([]);
   const [savedSensors, setSavedSensors] = useState<SensorEntity[]>([]); 
 
-  const getSensorType = (id: string): 'B01' | 'C01' | 'N01' | 'UNKNOWN' => {
+  // --- DETECCIÓN INTELIGENTE DE TIPO ---
+  const getSensorType = (id: string): SensorModelType => {
     const upperId = id.toUpperCase();
-    if (upperId.includes('B01')) return 'B01';
+    if (upperId.includes('B01') || upperId.includes('A01')) return 'B01'; // A01 se comporta similar a B01 por ahora
     if (upperId.includes('C01')) return 'C01';
-    if (upperId.includes('N01')) return 'N01'; 
+    if (upperId.includes('N01') || upperId.includes('N02')) return 'N01'; // Gateways
     return 'UNKNOWN';
   };
 
@@ -73,19 +77,15 @@ export default function HomeScreen() {
       console.log(`[Home] Cargados ${sensors.length} sensores de la DB.`);
   };
 
-  // --- GESTIÓN DEL FOCO (CORREGIDO) ---
+  // --- GESTIÓN DEL FOCO ---
   useFocusEffect(
     useCallback(() => {
       console.log("--> Home Enfocado");
-      
-      // Variable para limpiar el timeout
-      // CORRECCIÓN: Usamos 'any' para evitar conflictos entre tipos de Node y RN
       let timeoutId: any; 
 
-      // Retrasamos la lógica BLE 100ms para asegurar que la UI se montó
       timeoutId = setTimeout(() => {
           if (connectedDevice) {
-              console.log("[Home] Dispositivo detectado al volver. Ejecutando desconexión...");
+              console.log("[Home] Dispositivo detectado al volver. Desconectando...");
               disconnectDevice();
           }
 
@@ -97,7 +97,7 @@ export default function HomeScreen() {
 
       return () => {
         console.log("<-- Saliendo de Home");
-        clearTimeout(timeoutId); // Limpiamos el timeout pendiente
+        clearTimeout(timeoutId);
         stopScan();
       };
     }, [connectedDevice, disconnectDevice, clearScannedDevices, startScan, stopScan]) 
@@ -127,12 +127,13 @@ export default function HomeScreen() {
           name: savedSensor.alias, 
           rssi: null, 
           isSaved: true,
-          type: savedSensor.type,
+          type: savedSensor.type as SensorModelType,
         });
       }
     });
 
     combined.sort((a, b) => {
+      // Prioridad: 1. Con señal (RSSI > -999), 2. Guardados
       const rssiA = a.rssi ?? -999;
       const rssiB = b.rssi ?? -999;
       return rssiB - rssiA;
@@ -154,55 +155,57 @@ export default function HomeScreen() {
             if (!item.isSaved) {
                 console.log("[Home] Guardando nuevo sensor en DB...");
                 
-                // Determinar el tipo para la DB (DB no debe tener 'UNKNOWN')
-                const dbType = item.type === 'UNKNOWN' ? 'B01' : item.type; // Asumir B01 por defecto
-
-                // --- CORRECCIÓN 2: Incluir propiedades de Sincronización ---
+                const dbType = item.type === 'UNKNOWN' ? 'B01' : item.type;
                 const now = new Date().toISOString();
 
                 const newSensor: SensorEntity = {
                     id: item.id,
                     alias: item.name,
-                    type: dbType, // Usamos el tipo determinado
+                    type: dbType, 
                     location: 'Sin asignar',
                     activity: 'Activo',
                     config_json: '{}',
                     last_sync: now,
-                    
-                    // PROPIEDADES DE SINCRONIZACIÓN (is_synced, updated_at)
                     is_synced: 0, 
                     updated_at: now, 
                 };
                 await saveSensor(newSensor);
                 await loadSensorsFromDB(); 
             }
-            router.push(`/sensor/${item.id}/dashboard`);
+            // Navegar según tipo
+            if (item.type === 'N01') {
+                router.push(`/gateway/${item.id}/dashboard`);
+            } else {
+                router.push(`/sensor/${item.id}/dashboard`);
+            }
         } catch (error) {
             console.log("Error conectando:", error);
         }
     }
     else if (item.isSaved) {
         // OFFLINE
-        router.push(`/sensor/${item.id}/dashboard`);
+        if (item.type === 'N01') {
+             router.push(`/gateway/${item.id}/dashboard`);
+        } else {
+             router.push(`/sensor/${item.id}/dashboard`);
+        }
     }
   };
 
   const renderItem = ({ item }: { item: SensorItem }) => {
-    // Determinar tipo y propiedades visuales
     const type = item.type;
     const isOffline = item.rssi === null;
 
-    // Mapeo de tipos a icono y colores/etiquetas
+    // --- MAPA VISUAL ---
     const typeMap: Record<string, { icon: string; bg: string; iconColor: string; label: string }> = {
       B01: { icon: 'sprout', bg: '#e3f2fd', iconColor: Colors.primary, label: 'Sensor Suelo (B01)' },
       C01: { icon: 'weather-partly-cloudy', bg: '#fff3e0', iconColor: Colors.secondary, label: 'Estación Climática (C01)' },
-      N01: { icon: 'router-wireless', bg: '#e8f5e9', iconColor: '#2e7d32', label: 'Gateway Antena (N01)' },
-      UNKNOWN: { icon: 'chip-outline', bg: '#f3f4f6', iconColor: Colors.textSecondary, label: 'Dispositivo' }
+      N01: { icon: 'router-wireless', bg: '#e8f5e9', iconColor: '#2e7d32', label: 'Gateway LoRa (N01)' }, // Nuevo Estilo
+      UNKNOWN: { icon: 'chip-outline', bg: '#f3f4f6', iconColor: Colors.textSecondary, label: 'Dispositivo Desconocido' }
     };
 
     const meta = typeMap[type] || typeMap.UNKNOWN;
 
-    // Color de señal
     let signalColor = Colors.textSecondary;
     if (!isOffline && item.rssi != null) {
       if (item.rssi > -70) signalColor = Colors.success;
@@ -210,7 +213,6 @@ export default function HomeScreen() {
       else signalColor = Colors.error;
     }
 
-    // Decide si la tarjeta está deshabilitada (mismo criterio que antes)
     const disabled = ( !item.isSaved && isOffline ) || isBusy;
 
     return (
@@ -314,6 +316,7 @@ export default function HomeScreen() {
 }
 
 const styles = StyleSheet.create({
+  // ... (Tus estilos se mantienen igual) ...
   container: { flex: 1, backgroundColor: '#f8f9fa' },
   header: {
     paddingHorizontal: 24, paddingVertical: 20, backgroundColor: '#fff',
@@ -348,17 +351,12 @@ const styles = StyleSheet.create({
   rssiText: { fontSize: 12, fontWeight: 'bold', marginLeft: 4 },
   offlineText: { fontSize: 12, color: Colors.textSecondary, fontStyle: 'italic' },
   newTag: { fontSize: 10, color: Colors.primary, fontWeight: 'bold', marginLeft: 6 },
-  
   loadingOverlay: {
       position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
-      backgroundColor: 'rgba(0,0,0,0.5)',
-      justifyContent: 'center', alignItems: 'center', zIndex: 999
+      backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'center', alignItems: 'center', zIndex: 999
   },
   loadingBox: {
-      width: 200, padding: 20, backgroundColor: '#fff',
-      borderRadius: 16, alignItems: 'center', elevation: 10
+      width: 200, padding: 20, backgroundColor: '#fff', borderRadius: 16, alignItems: 'center', elevation: 10
   },
-  loadingText: {
-      marginTop: 10, fontSize: 16, fontWeight: 'bold', color: Colors.textPrimary
-  }
+  loadingText: { marginTop: 10, fontSize: 16, fontWeight: 'bold', color: Colors.textPrimary }
 });

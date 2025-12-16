@@ -10,8 +10,22 @@
     "web": "expo start --web",
     "lint": "expo lint"
   },
+  "android": {
+    "adaptiveIcon": {
+      "foregroundImage": "./assets/images/icon.png",
+      "backgroundColor": "#ffffff"
+    },
+    "package": "com.inta.sensorapp",
+    "edgeToEdgeEnabled": true,
+    "predictiveBackGestureEnabled": false,
+    "permissions": [
+      "BLUETOOTH",
+      "BLUETOOTH_SCAN",
+      "BLUETOOTH_CONNECT",
+      "ACCESS_FINE_LOCATION"
+    ]
+  },
   "dependencies": {
-    "@config-plugins/react-native-ble-plx": "^7.0.0",
     "@expo/vector-icons": "^15.0.3",
     "@react-native-async-storage/async-storage": "^2.2.0",
     "@react-native-community/datetimepicker": "8.4.4",
