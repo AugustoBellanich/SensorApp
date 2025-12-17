@@ -3,6 +3,7 @@ import { useFocusEffect, useRouter } from "expo-router";
 import React, { useCallback, useEffect, useState } from "react";
 import {
   ActivityIndicator,
+  Alert,
   FlatList,
   StyleSheet,
   Text,
@@ -140,18 +141,18 @@ export default function HomeScreen() {
       let timeoutId: any;
 
       const onFocus = async () => {
-        if (connectedDevice) {
-          await disconnectDevice();
+        if (connectedDevice && !isBusy) {
+          // await disconnectDevice();
         }
 
         clearScannedDevices();
         setDisplayList([]);
-
-        // Recargamos DB por si agregaste un sensor nuevo en otra pantalla
         await loadSensorsFromDB();
 
         timeoutId = setTimeout(() => {
-          startScan();
+          if (!connectedDevice && !isBusy) {
+            startScan();
+          }
         }, 500);
       };
 
@@ -161,13 +162,7 @@ export default function HomeScreen() {
         clearTimeout(timeoutId);
         stopScan();
       };
-    }, [
-      connectedDevice,
-      disconnectDevice,
-      clearScannedDevices,
-      startScan,
-      stopScan,
-    ])
+    }, [connectedDevice, isBusy])
   );
 
   // --- 3. MERGE: BLE + DB ---
@@ -216,33 +211,27 @@ export default function HomeScreen() {
 
   // --- 4. ACCIÓN PRINCIPAL: ONBOARDING ---
   const handleConnectAction = async (item: SensorItem) => {
-    // Evitamos doble ejecución si ya estamos trabajando
     if (isBusy || isSyncing) return;
 
     if (item.device) {
-      // --- ESCENARIO A: DISPOSITIVO ENCONTRADO POR BLUETOOTH (ONLINE) ---
       try {
         setOnboardingStatus("Conectando BLE...");
-
-        // El nuevo connectToDevice blindado lanzará un error si falla el timeout o se duerme
         await connectToDevice(item.device);
 
-        // Si llegamos aquí, la conexión BLE fue exitosa
-        const cleanId = item.id.replace("SEN-", "");
+        // --- PUNTO CRÍTICO ---
+        // Usamos el nombre del sensor (ej: SEN-N01-25104E) si existe,
+        // sino la MAC. Queremos el ID limpio (N01-25104E).
+        const rawId = item.device.name || item.id;
+        const cleanId = rawId.replace("SEN-", "");
 
-        // Verificamos si ya lo tenemos en la base de datos local (SQLite)
+        console.log(`[DEBUG] ID Detectado: ${rawId} -> ID Limpio: ${cleanId}`);
+
+        setOnboardingStatus("Verificando registro...");
         const existingLocal = await getSensorById(cleanId);
 
         if (!existingLocal) {
-          // Si es un sensor totalmente nuevo para esta App
-          console.log(`[Onboarding] Nuevo sensor detectado: ${cleanId}`);
-          setOnboardingStatus("Verificando en la Nube...");
-
-          let newSensorData: SensorEntity;
-          let isFromCloud = false;
-
+          setOnboardingStatus("Consultando Nube...");
           try {
-            // 1. Intentamos ver si el sensor ya existe en Supabase y tenemos permiso
             const { data: cloudDevice, error } = await supabase
               .from("devices")
               .select("*")
@@ -250,84 +239,77 @@ export default function HomeScreen() {
               .single();
 
             if (cloudDevice && !error) {
-              console.log(
-                "[Onboarding] Encontrado en nube. Descargando configuración..."
+              console.log("[DEBUG] Sensor encontrado en Supabase.");
+              await saveSensor(
+                {
+                  id: cloudDevice.id,
+                  alias: cloudDevice.alias,
+                  type: cloudDevice.type,
+                  location: cloudDevice.name_farm,
+                  activity: cloudDevice.activity,
+                  lat: cloudDevice.lat,
+                  lng: cloudDevice.lng,
+                  config_json: JSON.stringify(cloudDevice.config),
+                  is_synced: 1,
+                  updated_at: cloudDevice.created_at,
+                  last_sync: new Date().toISOString(),
+                },
+                true
               );
-              newSensorData = {
-                id: cloudDevice.id,
-                alias: cloudDevice.alias,
-                type: cloudDevice.type,
-                location: cloudDevice.name_farm,
-                activity: cloudDevice.activity,
-                lat: cloudDevice.lat,
-                lng: cloudDevice.lng,
-                config_json: JSON.stringify(cloudDevice.config),
-                is_synced: 1, // Ya está en la nube
-                updated_at: cloudDevice.created_at,
-                last_sync: new Date().toISOString(),
-              };
-              isFromCloud = true;
             } else {
-              throw new Error("No existe en nube o acceso denegado");
-            }
-          } catch (_) {
-            // 2. Si no hay internet o el sensor no es nuestro en la nube, lo creamos como local
-            console.log(
-              "[Onboarding] Creando registro local (Modo Instalador/Offline)."
-            );
-            const dbType = item.type === "UNKNOWN" ? "B01" : item.type;
-            const now = new Date().toISOString();
-
-            newSensorData = {
-              id: cleanId,
-              alias: item.name,
-              type: dbType,
-              location: "Sin asignar",
-              activity: "Activo",
-              config_json: "{}",
-              last_sync: now,
-              is_synced: 0, // Pendiente de subir. Evita que la limpieza lo borre.
-              updated_at: now,
-            };
-            isFromCloud = false;
-          }
-
-          // Guardamos el sensor en SQLite
-          await saveSensor(newSensorData, isFromCloud);
-
-          // Si es un sensor nuevo creado localmente, intentamos subirlo a la nube en background
-          if (!isFromCloud) {
-            syncService
-              .pushChanges()
-              .catch((e) =>
-                console.log(
-                  "Push background fallido (normal si es ajeno):",
-                  e.message
-                )
+              console.log(
+                "[DEBUG] No está en nube o error RLS. Creando local..."
               );
+              throw new Error("NOT_IN_CLOUD");
+            }
+          } catch (e) {
+            // Si no está en la nube, lo creamos local igual para no trabar al usuario
+            const now = new Date().toISOString();
+            await saveSensor(
+              {
+                id: cleanId,
+                alias: item.name,
+                type: item.type === "UNKNOWN" ? "N01" : item.type,
+                location: "Sin asignar",
+                activity: "Activo",
+                config_json: "{}",
+                is_synced: 0,
+                updated_at: now,
+                last_sync: now,
+              },
+              false
+            );
           }
-
-          // Actualizamos la lista del Home para que aparezca como "Guardado" (con el icono bookmark)
           await loadSensorsFromDB();
         }
 
-        // Finalizamos onboarding y navegamos al Dashboard correspondiente
+        // --- NAVEGACIÓN ---
         setOnboardingStatus(null);
+        console.log(`[DEBUG] Navegando a dashboard de ${cleanId}`);
 
-        if (item.type === "N01") {
-          router.push(`/gateway/${cleanId}/dashboard`);
-        } else {
-          router.push(`/sensor/${cleanId}/dashboard`);
-        }
+        // Usar setTimeout para dar tiempo a que los estados de BLE se asienten
+        setTimeout(() => {
+          if (item.type === "N01") {
+            router.push(`/gateway/${cleanId}/dashboard`);
+          } else {
+            router.push(`/sensor/${cleanId}/dashboard`);
+          }
+        }, 100);
       } catch (error: any) {
-        // --- MANEJO DE ERRORES DE CONEXIÓN (Sensor dormido, timeout, etc) ---
         setOnboardingStatus(null);
-        console.log("Error en el proceso de conexión:", error.message);
+        console.error("[DEBUG] Error en handleConnectAction:", error);
 
-        // Solo mostramos alerta si no es un error de "Busy" (evitar alertas duplicadas)
-        if (error.message !== "BUSY") {
-          // El error de Timeout ya dispara un Alert dentro del BleContext,
-          // pero aquí podemos capturar cualquier otro fallo.
+        // IMPORTANTE: Solo desconectamos si el error es realmente de BLE.
+        // Si el error fue de navegación o de base de datos, quizás no queremos desconectar.
+        if (
+          error.message.includes("BLE") ||
+          error.message.includes("TIMEOUT")
+        ) {
+          await disconnectDevice();
+          Alert.alert(
+            "Error",
+            "No se pudo establecer comunicación con el sensor."
+          );
         }
       }
     } else if (item.isSaved) {

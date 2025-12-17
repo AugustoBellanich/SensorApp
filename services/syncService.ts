@@ -24,54 +24,36 @@ export const syncService = {
 
   // 2. PUSH (SUBIDA)
   async pushChanges() {
-    if (!(await this.isOnline())) return;
-    console.log("🔄 Iniciando PUSH...");
+  if (!(await this.isOnline())) return;
+  const pendingSensors = await getSensorsPendingSync();
 
-    const pendingSensors = await getSensorsPendingSync();
+  for (const sensor of pendingSensors) {
+    const cleanId = sensor.id.replace("SEN-", "");
 
-    for (const sensor of pendingSensors) {
-      const cleanId = sensor.id.replace("SEN-", "");
+    console.log(`📤 Sincronizando metadatos de ${cleanId}...`);
 
-      // A. Verificar existencia (RLS)
-      const { data: cloudDevice } = await supabase
-        .from("devices") 
-        .select("*")
-        .eq("id", cleanId)
-        .single();
+    const { error } = await supabase.from("devices").upsert({
+      id: cleanId,
+      alias: sensor.alias,
+      type: sensor.type,
+      name_farm: sensor.location, 
+      activity: sensor.activity,
+      lat: sensor.lat,
+      lng: sensor.lng,
+      config: JSON.parse(sensor.config_json || "{}"),
+      // CAMBIO AQUÍ: Usamos el nombre real de tu columna en Supabase
+      last_sync: new Date().toISOString(), 
+    });
 
-      if (cloudDevice) {
-        // Existe y tengo permiso -> Lo marco como synced
-        console.log(`⚠️ Sensor ${cleanId} reconocido. Actualizando estado local.`);
-        await markSensorSynced(sensor.id);
-      } else {
-        // No existe para mí -> Intento Insertar
-        const { error } = await supabase.from("devices").insert({
-          id: cleanId,
-          alias: sensor.alias,
-          type: sensor.type,
-          name_farm: sensor.location,
-          activity: sensor.activity,
-          lat: sensor.lat,
-          lng: sensor.lng,
-          config: JSON.parse(sensor.config_json || "{}"), 
-        });
-
-        if (!error) {
-          console.log(`✅ ${cleanId} registrado exitosamente.`);
-          await markSensorSynced(sensor.id);
-        } else {
-          // B. MANEJO DE CONFLICTO DE PROPIEDAD
-          if (error.code === '23505') {
-              console.log(`🔒 El sensor ${cleanId} pertenece a otro usuario.`);
-              // Lo marcamos synced para que el Pull posterior lo pueda borrar
-              await markSensorSynced(sensor.id);
-          } else {
-              console.error(`❌ Error subiendo ${cleanId}:`, error.message);
-          }
-        }
-      }
+    if (!error) {
+      await markSensorSynced(sensor.id);
+      console.log(`✅ ${cleanId} sincronizado con éxito.`);
+    } else {
+      // Si el error persiste, esto nos dirá qué columna falta
+      console.error(`❌ Error sincronizando ${cleanId}:`, error.message);
     }
-  },
+  }
+},
 
   // 3. PULL (BAJADA Y LIMPIEZA)
   async pullChanges() {

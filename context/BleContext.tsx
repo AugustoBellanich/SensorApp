@@ -705,7 +705,7 @@ export const BleProvider = ({ children }: { children: React.ReactNode }) => {
 
         const timeoutPromise = new Promise(
           (_, reject) =>
-            setTimeout(() => reject(new Error(JS_TIMEOUT_ERROR)), 8000) // 8 segundos para el handshake inicial
+            setTimeout(() => reject(new Error(JS_TIMEOUT_ERROR)), 20000) // 20 segundos para el handshake inicial
         );
 
         // Carrera entre la conexión y nuestro timeout de JS
