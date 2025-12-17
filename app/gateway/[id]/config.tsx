@@ -212,15 +212,32 @@ export default function GatewayConfigScreen() {
     const handleDeleteData = async () => {
         Alert.alert("Borrar Datos", "¿Estás seguro de vaciar la memoria del Gateway?", [
             { text: "Cancelar" },
-            { text: "BORRAR", style: "destructive", onPress: async () => {
-                try {
-                    await connectedDevice?.writeCharacteristicWithResponseForService(
-                        BLE_UUIDS.SVC_STORAGE, BLE_UUIDS.STORAGE.FILE_DELETE,
-                        Buffer.from("ERASE").toString("base64")
-                    );
-                    Alert.alert("Hecho", "Memoria borrada.");
-                } catch(e) { Alert.alert("Error", "Fallo al borrar."); }
-            }}
+            { 
+                text: "BORRAR", 
+                style: "destructive", 
+                onPress: async () => {
+                    if (!connectedDevice) return;
+                    setIsWriting(true); // Bloqueamos UI
+                    try {
+                        console.log("Enviando comando de borrado (1)...");
+                        
+                        // CAMBIO CLAVE: Usamos WithoutResponse para evitar timeouts 
+                        // en operaciones largas como borrar Flash.
+                        await connectedDevice.writeCharacteristicWithoutResponseForService(
+                            BLE_UUIDS.SVC_STORAGE, 
+                            BLE_UUIDS.STORAGE.FILE_DELETE,
+                            Buffer.from("1").toString("base64")
+                        );
+
+                        Alert.alert("Comando Enviado", "El Gateway está borrando la memoria. Esto puede tomar unos segundos.");
+                    } catch(e) { 
+                        console.error("Error borrando:", e);
+                        Alert.alert("Error", "No se pudo enviar el comando."); 
+                    } finally {
+                        setIsWriting(false);
+                    }
+                }
+            }
         ]);
     };
 
