@@ -405,10 +405,12 @@ export const BleProvider = ({ children }: { children: React.ReactNode }) => {
         );
         activeSubscriptions.current.forEach((subscription) => {
           try {
-            subscription.remove();
+            // Protección contra el crash de Android NullPointerException
+            if (subscription && typeof subscription.remove === "function") {
+              subscription.remove();
+            }
           } catch (e) {
-            // Este catch silencioso evita el crash "Parameter specified as non-null is null"
-            // Es un error nativo de Android irrelevante en este punto (ya se desconectó).
+            // Silenciamos fallos nativos durante la desconexión
           }
         });
       }
@@ -672,9 +674,11 @@ export const BleProvider = ({ children }: { children: React.ReactNode }) => {
         isDisconnectingRef.current = false;
         setSensorData({});
 
+        // --- SUB-FUNCIÓN DE CONEXIÓN ---
         const performConnection = async () => {
           logTrace("CONNECT", "Conectando nativo...");
-          const connected = await device.connect();
+          // Agregamos opciones para evitar el autoConnect que a veces causa demoras
+          const connected = await device.connect({ autoConnect: false });
 
           logTrace("CONNECT", "Descubriendo servicios...");
           await connected.discoverAllServicesAndCharacteristics();
@@ -682,74 +686,82 @@ export const BleProvider = ({ children }: { children: React.ReactNode }) => {
           logTrace("CONNECT", "Leyendo info...");
           const info = await getDeviceInfo(connected);
 
-          logTrace("CONNECT", "Leyendo diagnóstico (Modo Seguro)...");
+          logTrace("CONNECT", "Leyendo diagnóstico...");
           const diagnosis = await readDiagnosisAndConfig(
             connected,
             info.category
           );
           setDiagnosisStatus(diagnosis);
 
-          logTrace("CONNECT", "Leyendo batería inicial...");
-          const batteryVal = await safeReadCharacteristic(
-            connected.id,
-            BLE_UUIDS.SVC_BATTERY,
-            BLE_UUIDS.CHAR_BATTERY_LVL
-          );
-          if (batteryVal) {
-            const battPct = decodeBinaryByte(batteryVal);
-            setSensorData((prev) => ({ ...prev, battery: battPct }));
-          }
-
-          logTrace("CONNECT", `Iniciando monitoreo...`);
+          logTrace("CONNECT", "Iniciando monitoreo...");
           await startMonitoringData(connected, info.category);
-
-          const subscription = connected.onDisconnected(
-            (error, disconnectedDevice) => {
-              if (isDisconnectingRef.current) {
-                subscription.remove();
-                return;
-              }
-              logTrace("DISCONNECT", "Evento nativo: Desconexión INESPERADA.");
-              stopMonitoringData(true);
-              setConnectedDevice(null);
-              setSensorInfo(null);
-              setSensorData({});
-              setDiagnosisStatus(INITIAL_DIAGNOSIS_STATUS);
-              subscription.remove();
-            }
-          );
 
           return { connected, info };
         };
 
-        const timeoutPromise = new Promise((_, reject) =>
-          setTimeout(() => reject(new Error("TIMEOUT")), CONNECTION_TIMEOUT_MS)
+        // --- TIMEOUT CONTROLADO DESDE JS ---
+        // Definimos un error específico para nuestro timeout
+        const JS_TIMEOUT_ERROR = "JS_TIMEOUT_CRITICAL";
+
+        const timeoutPromise = new Promise(
+          (_, reject) =>
+            setTimeout(() => reject(new Error(JS_TIMEOUT_ERROR)), 8000) // 8 segundos para el handshake inicial
         );
 
+        // Carrera entre la conexión y nuestro timeout de JS
         // @ts-ignore
         const result: { connected: Device; info: SensorInfo } =
           await Promise.race([performConnection(), timeoutPromise]);
 
+        // Si llegamos aquí, la conexión fue exitosa
         setConnectedDevice(result.connected);
         setSensorInfo(result.info);
+
+        // Suscripción de desconexión con limpieza segura
+        const discSub = result.connected.onDisconnected(
+          (error, disconnectedDevice) => {
+            if (isDisconnectingRef.current) {
+              discSub.remove();
+              return;
+            }
+            logTrace("DISCONNECT", "INESPERADA (Sensor se durmió o alejó).");
+            stopMonitoringData(true);
+            setConnectedDevice(null);
+            setDiagnosisStatus(INITIAL_DIAGNOSIS_STATUS);
+            discSub.remove();
+          }
+        );
+
         logTrace("CONNECT", "¡Conexión Exitosa!");
       } catch (error: any) {
-        logTrace("CONNECT_ERROR", error.message);
+        logTrace("CONNECT_ERROR_CATCH", error.message);
 
-        const msg =
-          error.message === "TIMEOUT"
-            ? "El sensor tardó demasiado. Asegúrese que esté encendido y cerca."
-            : "No se pudo conectar. Intente nuevamente.";
+        // Si falló por nuestro timeout o por error nativo, limpiamos agresivamente
+        let msg = "No se pudo conectar. Intente nuevamente.";
+
+        if (error.message === "JS_TIMEOUT_CRITICAL") {
+          msg = "El sensor no respondió a tiempo. Intente despertarlo.";
+          logTrace("CONNECT", "Cancelando conexión colgada por Timeout JS.");
+        }
 
         Alert.alert("Error de Conexión", msg);
 
         stopMonitoringData(false);
+
+        // Intentamos cancelar la conexión nativa para liberar el stack de Bluetooth
         try {
-          await device.cancelConnection();
-        } catch (e) {}
+          // Usamos el ID directamente si el objeto device está en un estado inconsistente
+          await manager.cancelDeviceConnection(device.id);
+        } catch (e) {
+          logTrace("CONNECT", "Error al liberar stack nativo (ignorable).");
+        }
+
         setConnectedDevice(null);
         setSensorInfo(null);
         setDiagnosisStatus(INITIAL_DIAGNOSIS_STATUS);
+
+        // LANZAMOS EL ERROR para que el componente que llamó (HomeScreen) se entere
+        throw error;
       } finally {
         setIsBusy(false);
       }
@@ -762,7 +774,7 @@ export const BleProvider = ({ children }: { children: React.ReactNode }) => {
       readDiagnosisAndConfig,
       startMonitoringData,
       stopMonitoringData,
-      safeReadCharacteristic,
+      manager,
     ]
   );
 

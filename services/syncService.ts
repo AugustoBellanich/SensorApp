@@ -1,6 +1,8 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import NetInfo from "@react-native-community/netinfo";
 import {
+  deleteSensor,
+  getAllSensors,
   getSensorsPendingSync,
   markSensorSynced,
   saveSensor,
@@ -11,19 +13,16 @@ import { supabase } from "../lib/supabase";
 const LAST_PULL_KEY = "LAST_SYNC_TIMESTAMP";
 
 export const syncService = {
-  // 1. VERIFICAR CONEXIÓN
   async isOnline(): Promise<boolean> {
     const state = await NetInfo.fetch();
     return (state.isConnected && state.isInternetReachable) || false;
   },
 
-  // RESETEAR SYNC
   async resetSyncDate() {
       await AsyncStorage.removeItem(LAST_PULL_KEY);
-      console.log("🔄 Fecha de sync reseteada.");
   },
 
-  // 2. PUSH (SUBIDA): SQLite -> Supabase
+  // 2. PUSH (SUBIDA)
   async pushChanges() {
     if (!(await this.isOnline())) return;
     console.log("🔄 Iniciando PUSH...");
@@ -31,115 +30,109 @@ export const syncService = {
     const pendingSensors = await getSensorsPendingSync();
 
     for (const sensor of pendingSensors) {
-      // A. Protección: ¿Existe ya en la nube? (Tabla 'devices')
+      const cleanId = sensor.id.replace("SEN-", "");
+
+      // A. Verificar existencia (RLS)
       const { data: cloudDevice } = await supabase
         .from("devices") 
         .select("*")
-        .eq("id", sensor.id)
+        .eq("id", cleanId)
         .single();
 
       if (cloudDevice) {
-        // CONFLICTO: Ya existe en la nube. La nube gana.
-        console.log(`⚠️ Conflicto: Sensor ${sensor.id} ya existe. Priorizando nube.`);
-
-        // Mapeo Nube -> Local
-        const localSensorUpdated: SensorEntity = {
-          id: cloudDevice.id,
-          alias: cloudDevice.alias, 
-          type: cloudDevice.type,
-          location: cloudDevice.name_farm, // Mapeo: name_farm -> location
-          activity: cloudDevice.activity,
-          lat: cloudDevice.lat,
-          lng: cloudDevice.lng,
-          config_json: JSON.stringify(cloudDevice.config), // Mapeo: config (json) -> string
-          is_synced: 1, 
-          updated_at: cloudDevice.created_at, // Usamos created_at por defecto si no hay updated_at
-          last_sync: new Date().toISOString()
-        };
-
-        await saveSensor(localSensorUpdated, true);
+        // Existe y tengo permiso -> Lo marco como synced
+        console.log(`⚠️ Sensor ${cleanId} reconocido. Actualizando estado local.`);
+        await markSensorSynced(sensor.id);
       } else {
-        // NO EXISTE: Es nuevo, lo subimos.
-        console.log(`📤 Subiendo nuevo dispositivo: ${sensor.id}`);
-
-        // Mapeo Local -> Nube
+        // No existe para mí -> Intento Insertar
         const { error } = await supabase.from("devices").insert({
-          id: sensor.id,
+          id: cleanId,
           alias: sensor.alias,
           type: sensor.type,
-          name_farm: sensor.location,      // Mapeo: location -> name_farm
+          name_farm: sensor.location,
           activity: sensor.activity,
           lat: sensor.lat,
           lng: sensor.lng,
-          config: JSON.parse(sensor.config_json || "{}"), // Mapeo: string -> jsonb
-          // Supabase pone created_at automático
+          config: JSON.parse(sensor.config_json || "{}"), 
         });
 
         if (!error) {
+          console.log(`✅ ${cleanId} registrado exitosamente.`);
           await markSensorSynced(sensor.id);
         } else {
-          console.error(`❌ Error subiendo ${sensor.id}:`, error);
+          // B. MANEJO DE CONFLICTO DE PROPIEDAD
+          if (error.code === '23505') {
+              console.log(`🔒 El sensor ${cleanId} pertenece a otro usuario.`);
+              // Lo marcamos synced para que el Pull posterior lo pueda borrar
+              await markSensorSynced(sensor.id);
+          } else {
+              console.error(`❌ Error subiendo ${cleanId}:`, error.message);
+          }
         }
       }
     }
   },
 
-  // 3. PULL (BAJADA): Supabase -> SQLite
+  // 3. PULL (BAJADA Y LIMPIEZA)
   async pullChanges() {
     if (!(await this.isOnline())) return;
     console.log("🔄 Iniciando PULL...");
 
-    const lastSync = (await AsyncStorage.getItem(LAST_PULL_KEY)) || "1970-01-01T00:00:00Z";
-    const now = new Date().toISOString();
-
-    // Traer dispositivos creados recientemente
-    // NOTA: Tu tabla 'devices' no tiene 'updated_at', solo 'created_at'.
-    // Usamos 'created_at' para traer nuevos. Si editas un nombre en la nube, 
-    // no se bajará hasta que agregues una columna 'updated_at' en Supabase.
+    // A. Traer permitidos
     const { data: remoteDevices, error } = await supabase
       .from("devices")
-      .select("*")
-      .gt("created_at", lastSync);
+      .select("*");
 
     if (error) {
       console.error("❌ Error bajando devices:", error);
       return;
     }
+    if (!remoteDevices) return;
 
-    if (remoteDevices && remoteDevices.length > 0) {
-      for (const remote of remoteDevices) {
-        // Mapeo Nube -> Local
+    const allowedIds = remoteDevices.map(d => d.id);
+    const now = new Date().toISOString();
+
+    // B. Actualizar locales
+    console.log(`⬇️ Sincronizando ${remoteDevices.length} sensores permitidos...`);
+    for (const remote of remoteDevices) {
         const localSensor: SensorEntity = {
           id: remote.id,
           alias: remote.alias,
           type: remote.type,
-          location: remote.name_farm, // Mapeo
+          location: remote.name_farm, 
           activity: remote.activity,
           lat: remote.lat,
           lng: remote.lng,
-          config_json: JSON.stringify(remote.config), // Mapeo
-          is_synced: 1, // Viene de la nube
+          config_json: JSON.stringify(remote.config), 
+          is_synced: 1, 
           updated_at: remote.created_at,
           last_sync: now
         };
-
         await saveSensor(localSensor, true);
-      }
-      console.log(`⬇️ Descargados ${remoteDevices.length} dispositivos.`);
+    }
+
+    // C. LIMPIEZA DE INTRUSOS
+    const allLocalSensors = await getAllSensors();
+
+    for (const local of allLocalSensors) {
+        const cleanLocalId = local.id.replace("SEN-", "");
+        
+        // Si ya intentamos subirlo (is_synced=1) Y no está en la lista de permitidos
+        if (local.is_synced === 1 && !allowedIds.includes(cleanLocalId)) {
+            console.log(`🚫 Eliminando sensor no autorizado: ${local.id}`);
+            await deleteSensor(local.id);
+        }
     }
 
     await AsyncStorage.setItem(LAST_PULL_KEY, now);
+    console.log("✅ PULL finalizado.");
   },
 
-  // 4. ORQUESTADOR
   async syncAll() {
-    if (!(await this.isOnline())) {
-      console.log("📴 Modo Offline.");
-      return;
-    }
+    if (!(await this.isOnline())) return;
     try {
-      await this.pushChanges(); 
-      await this.pullChanges(); 
+      await this.pushChanges(); // 1. Intenta subir (y detecta si es ajeno)
+      await this.pullChanges(); // 2. Descarga permitidos y borra ajenos
       console.log("✨ Sincronización completa.");
     } catch (error) {
       console.error("Error en SyncAll:", error);

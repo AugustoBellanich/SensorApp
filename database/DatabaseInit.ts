@@ -12,9 +12,9 @@ export const initDatabase = async () => {
     // ---------------------------------------------------------
     // ZONA DE PELIGRO: Descomentar solo para REINICIAR la DB
     // ---------------------------------------------------------
-    await db.execAsync('DROP TABLE IF EXISTS readings_b01');
-    await db.execAsync('DROP TABLE IF EXISTS readings_c01');
-    await db.execAsync('DROP TABLE IF EXISTS sensors');
+    // await db.execAsync('DROP TABLE IF EXISTS readings_b01');
+    // await db.execAsync('DROP TABLE IF EXISTS readings_c01');
+    // await db.execAsync('DROP TABLE IF EXISTS sensors');
     // ---------------------------------------------------------
 
     // 1. Tabla de SENSORES
