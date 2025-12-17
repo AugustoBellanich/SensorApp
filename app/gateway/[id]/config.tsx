@@ -21,14 +21,14 @@ import { BLE_UUIDS } from "../../../constants/BleUUIDs";
 import { Colors } from "../../../constants/Colors";
 import { useBle } from "../../../context/BleContext";
 import { getSensorById, saveSensor } from "../../../database/SensorRepository";
+import {
+    INGEST_TOKEN,
+    SUPABASE_ANON_KEY,
+    SUPABASE_FUNCTION_URL // <--- USAMOS ESTA URL PARA EL GATEWAY
+} from "../../../lib/supabase";
 
 // Utilidad Sleep
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-
-// Variables de entorno (Credenciales ocultas)
-const ENV_SUPA_URL = process.env.EXPO_PUBLIC_SUPABASE_URL || "";
-const ENV_ANON_KEY = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY || "";
-const ENV_INGEST_TOKEN = process.env.EXPO_PUBLIC_INGEST_TOKEN || "";
 
 export default function GatewayConfigScreen() {
     const { id } = useLocalSearchParams();
@@ -81,11 +81,10 @@ export default function GatewayConfigScreen() {
         };
 
         readDeviceConfig();
-    }, [isConnected]); // Se ejecuta al conectar
+    }, [isConnected]); 
 
-// --- ACCIÓN 1: ACTUALIZAR WIFI (CORREGIDA) ---
+// --- ACCIÓN 1: ACTUALIZAR WIFI ---
     const handleUpdateWifi = async () => {
-        // 1. Limpiamos espacios accidentales (trim)
         const cleanSsid = wifiSsid.trim();
         const cleanPass = wifiPass.trim();
 
@@ -97,8 +96,7 @@ export default function GatewayConfigScreen() {
         try {
             console.log("--- Iniciando Configuración WiFi ---");
 
-            // 2. ENVIAR PASSWORD PRIMERO
-            // Solo lo enviamos si el usuario escribió algo. Si lo deja vacío, mantenemos el viejo.
+            // 1. ENVIAR PASSWORD (si existe cambio)
             if (cleanPass.length > 0) {
                 console.log("Enviando Password...");
                 await connectedDevice?.writeCharacteristicWithResponseForService(
@@ -106,14 +104,12 @@ export default function GatewayConfigScreen() {
                     BLE_UUIDS.CONFIG.WIFI_PASS, 
                     Buffer.from(cleanPass).toString("base64")
                 );
-                // Esperamos un poco más para asegurar que se guardó en Flash
                 await sleep(800);
             } else {
-                console.log("Password vacío, se conserva el actual del dispositivo.");
+                console.log("Password vacío, se conserva el actual.");
             }
             
-            // 3. ENVIAR SSID AL FINAL (El Gatillo)
-            // Esto suele disparar la reconexión en el firmware
+            // 2. ENVIAR SSID (Gatillo de reconexión)
             console.log("Enviando SSID:", cleanSsid);
             await connectedDevice?.writeCharacteristicWithResponseForService(
                 BLE_UUIDS.SVC_CONFIG, 
@@ -123,43 +119,51 @@ export default function GatewayConfigScreen() {
             
             Alert.alert(
                 "Configuración Enviada", 
-                `El Gateway intentará conectarse a "${cleanSsid}".\n\nSi la luz del dispositivo cambia de Rojo a Verde (o muestra 'W' en pantalla), la conexión fue exitosa.`
+                `El Gateway intentará conectarse a "${cleanSsid}".\n\nSi el LED cambia a Verde (o muestra 'W'), conexión exitosa.`
             );
 
-            // Limpiamos el campo pass por seguridad visual
             setWifiPass(""); 
 
         } catch (e) {
             console.error("Error WiFi update:", e);
-            Alert.alert("Error de Comunicación", "No se pudo completar la configuración. Acércate más al dispositivo e intenta de nuevo.");
+            Alert.alert("Error", "No se pudo completar la configuración.");
         } finally {
             setIsWriting(false);
         }
     };
 
-    // --- ACCIÓN 2: SINCRONIZAR SERVIDOR (OCULTO) ---
+    // --- ACCIÓN 2: SINCRONIZAR SERVIDOR (CORREGIDO) ---
     const handleSyncServer = async () => {
         setIsWriting(true);
         try {
+            // Limpiamos el ID: "SEN-N01-123" -> "N01-123"
+            // Esto asegura que el ID coincida con el de la Base de Datos
+            const cleanId = sensorId.replace("SEN-", ""); 
+
             const cmds = [
-                { uuid: BLE_UUIDS.CONFIG.SUPABASE_URL, val: ENV_SUPA_URL, name: "URL" },
-                { uuid: BLE_UUIDS.CONFIG.ANON_KEY, val: ENV_ANON_KEY, name: "API Key" },
-                { uuid: BLE_UUIDS.CONFIG.INGEST_TOKEN, val: ENV_INGEST_TOKEN, name: "Token" },
-                // Enviamos también el ID limpio para asegurar
-                { uuid: BLE_UUIDS.CONFIG.UPLOADER_ID, val: sensorId.replace("SEN-", "").replace("N01-",""), name: "ID" }
+                // CAMBIO IMPORTANTE: Enviamos la URL de la FUNCIÓN DE INGESTA
+                { uuid: BLE_UUIDS.CONFIG.SUPABASE_URL, val: SUPABASE_FUNCTION_URL, name: "URL Función" },
+                
+                { uuid: BLE_UUIDS.CONFIG.ANON_KEY, val: SUPABASE_ANON_KEY, name: "API Key" },
+                { uuid: BLE_UUIDS.CONFIG.INGEST_TOKEN, val: INGEST_TOKEN, name: "Token" },
+                { uuid: BLE_UUIDS.CONFIG.UPLOADER_ID, val: cleanId, name: "ID" }
             ];
 
             for (const cmd of cmds) {
-                if (!cmd.val) continue;
+                if (!cmd.val) {
+                    console.warn(`[Config] Falta valor para ${cmd.name}`);
+                    continue;
+                }
                 console.log(`Enviando ${cmd.name}...`);
                 await connectedDevice?.writeCharacteristicWithResponseForService(
                     BLE_UUIDS.SVC_CONFIG, cmd.uuid, 
                     Buffer.from(cmd.val).toString("base64")
                 );
-                await sleep(400);
+                await sleep(400); // Pequeña pausa para que el ESP32 procese
             }
             Alert.alert("Sincronización Exitosa", "Credenciales del servidor actualizadas en el Gateway.");
         } catch (e) {
+            console.error(e);
             Alert.alert("Error", "Fallo al enviar credenciales.");
         } finally {
             setIsWriting(false);
@@ -180,8 +184,8 @@ export default function GatewayConfigScreen() {
                 Buffer.from(localSaveInterval).toString("base64")
             );
 
-            // Guardar referencia en DB local para recordar preferencias
-            const currentSensor = await getSensorById(sensorId);
+            // Guardar referencia en DB local
+            const currentSensor = await getSensorById(sensorId.replace("SEN-", ""));
             if (currentSensor) {
                 const conf = currentSensor.config_json ? JSON.parse(currentSensor.config_json) : {};
                 conf.uploadInterval = parseInt(uploadInterval);
@@ -217,18 +221,15 @@ export default function GatewayConfigScreen() {
                 style: "destructive", 
                 onPress: async () => {
                     if (!connectedDevice) return;
-                    setIsWriting(true); // Bloqueamos UI
+                    setIsWriting(true);
                     try {
                         console.log("Enviando comando de borrado (1)...");
-                        
-                        // CAMBIO CLAVE: Usamos WithoutResponse para evitar timeouts 
-                        // en operaciones largas como borrar Flash.
+                        // Usamos WithoutResponse para evitar timeouts en borrado flash
                         await connectedDevice.writeCharacteristicWithoutResponseForService(
                             BLE_UUIDS.SVC_STORAGE, 
                             BLE_UUIDS.STORAGE.FILE_DELETE,
                             Buffer.from("1").toString("base64")
                         );
-
                         Alert.alert("Comando Enviado", "El Gateway está borrando la memoria. Esto puede tomar unos segundos.");
                     } catch(e) { 
                         console.error("Error borrando:", e);
@@ -288,14 +289,14 @@ export default function GatewayConfigScreen() {
                     </View>
                 </View>
 
-                {/* 2. SECCIÓN SERVIDOR (OCULTO) */}
+                {/* 2. SECCIÓN SERVIDOR */}
                 <View style={styles.section}>
                     <Text style={styles.sectionTitle}>Conexión Servidor</Text>
                     <View style={styles.card}>
                         <View style={{flexDirection:'row', alignItems:'center', marginBottom:10}}>
                             <MaterialCommunityIcons name="shield-check" size={24} color={Colors.success} />
-                            <Text style={{marginLeft:10, color:'#555', flex:1}}>
-                                Las credenciales (URL, API Key) se cargan automáticamente desde la aplicación.
+                            <Text style={{marginLeft:10, color:'#555', flex:1, fontSize: 13}}>
+                                Las credenciales (URL Función, API Key, Token) se cargan desde la App.
                             </Text>
                         </View>
                         <TouchableOpacity style={[styles.btnSecondary, globalDisabled && styles.btnDisabled]} onPress={handleSyncServer} disabled={globalDisabled}>

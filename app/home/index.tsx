@@ -14,9 +14,11 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Colors } from "../../constants/Colors";
 import { useBle } from "../../context/BleContext";
 
-// --- DB REPOSITORY ---
-import { getAllSensors, saveSensor } from "../../database/SensorRepository";
+// --- DB & SYNC ---
+import { getAllSensors, getSensorById, saveSensor } from "../../database/SensorRepository";
 import { SensorEntity } from "../../database/types";
+import { supabase } from "../../lib/supabase";
+import { syncService } from "../../services/syncService"; // Asegúrate que coincida con tu archivo
 
 // Tipos de Sensores Soportados
 type SensorModelType = 'B01' | 'C01' | 'N01' | 'UNKNOWN';
@@ -61,13 +63,15 @@ export default function HomeScreen() {
 
   const [displayList, setDisplayList] = useState<SensorItem[]>([]);
   const [savedSensors, setSavedSensors] = useState<SensorEntity[]>([]); 
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [onboardingStatus, setOnboardingStatus] = useState<string | null>(null);
 
   // --- DETECCIÓN INTELIGENTE DE TIPO ---
   const getSensorType = (id: string): SensorModelType => {
     const upperId = id.toUpperCase();
-    if (upperId.includes('B01') || upperId.includes('A01')) return 'B01'; // A01 se comporta similar a B01 por ahora
+    if (upperId.includes('B01') || upperId.includes('A01')) return 'B01';
     if (upperId.includes('C01')) return 'C01';
-    if (upperId.includes('N01') || upperId.includes('N02')) return 'N01'; // Gateways
+    if (upperId.includes('N01') || upperId.includes('N02')) return 'N01';
     return 'UNKNOWN';
   };
 
@@ -77,33 +81,54 @@ export default function HomeScreen() {
       console.log(`[Home] Cargados ${sensors.length} sensores de la DB.`);
   };
 
-  // --- GESTIÓN DEL FOCO ---
+  // --- 1. SINCRONIZACIÓN SILENCIOSA AL INICIO ---
+  useEffect(() => {
+    const initSync = async () => {
+        setIsSyncing(true);
+        try {
+            await syncService.pullChanges();
+            await loadSensorsFromDB(); 
+        } catch (e) {
+            console.log("Sync warning (Silent Pull Failed):", e);
+        } finally {
+            setIsSyncing(false);
+        }
+    };
+    initSync();
+  }, []); 
+
+  // --- 2. GESTIÓN DEL FOCO (INICIA ESCANEO) ---
   useFocusEffect(
     useCallback(() => {
-      console.log("--> Home Enfocado");
       let timeoutId: any; 
 
-      timeoutId = setTimeout(() => {
+      const onFocus = async () => {
           if (connectedDevice) {
-              console.log("[Home] Dispositivo detectado al volver. Desconectando...");
-              disconnectDevice();
+              await disconnectDevice();
           }
-
+          
           clearScannedDevices();
           setDisplayList([]); 
-          loadSensorsFromDB(); 
-          startScan();
-      }, 100);
+          
+          if (savedSensors.length === 0) {
+            await loadSensorsFromDB();
+          }
+
+          timeoutId = setTimeout(() => {
+              startScan();
+          }, 500);
+      };
+
+      onFocus();
 
       return () => {
-        console.log("<-- Saliendo de Home");
         clearTimeout(timeoutId);
         stopScan();
       };
-    }, [connectedDevice, disconnectDevice, clearScannedDevices, startScan, stopScan]) 
+    }, [connectedDevice, disconnectDevice, clearScannedDevices, startScan, stopScan, savedSensors.length]) 
   );
 
-  // --- MERGE: BLE + DB ---
+  // --- 3. MERGE: BLE + DB ---
   useEffect(() => {
     const combined: SensorItem[] = scannedDevices.map(device => {
       const uniqueId = device.name || device.id;
@@ -114,7 +139,7 @@ export default function HomeScreen() {
         name: known?.alias || device.name || 'Sensor Nuevo', 
         rssi: device.rssi,
         isSaved: !!known,
-        type: getSensorType(uniqueId),
+        type: known?.type as SensorModelType || getSensorType(uniqueId), 
         device: device 
       };
     });
@@ -133,7 +158,6 @@ export default function HomeScreen() {
     });
 
     combined.sort((a, b) => {
-      // Prioridad: 1. Con señal (RSSI > -999), 2. Guardados
       const rssiA = a.rssi ?? -999;
       const rssiB = b.rssi ?? -999;
       return rssiB - rssiA;
@@ -143,47 +167,107 @@ export default function HomeScreen() {
   }, [scannedDevices, savedSensors]); 
 
   
+  // --- 4. ACCIÓN PRINCIPAL: ONBOARDING INTELIGENTE ---
   const handleConnectAction = async (item: SensorItem) => {
-    if (isBusy) return;
+    if (isBusy || isSyncing) return;
 
     if (item.device) {
-        // ONLINE
+        // ONLINE (BLE Detectado)
         try {
+            setOnboardingStatus("Conectando BLE...");
             await connectToDevice(item.device);
             
-            // Si es nuevo, guardar en DB
-            if (!item.isSaved) {
-                console.log("[Home] Guardando nuevo sensor en DB...");
+            // --- CORRECCIÓN CRÍTICA DE ID ---
+            // Limpiamos "SEN-" para que coincida con la DB
+            const cleanId = item.id.replace("SEN-", ""); 
+            
+            // Verificamos si ya existe localmente
+            const existingLocal = await getSensorById(cleanId);
+            
+            if (!existingLocal) {
+                console.log(`[Onboarding] Nuevo sensor detectado: ${item.id} -> ${cleanId}`);
+                setOnboardingStatus("Verificando en la Nube...");
                 
-                const dbType = item.type === 'UNKNOWN' ? 'B01' : item.type;
-                const now = new Date().toISOString();
+                let newSensorData: SensorEntity;
+                let isFromCloud = false;
 
-                const newSensor: SensorEntity = {
-                    id: item.id,
-                    alias: item.name,
-                    type: dbType, 
-                    location: 'Sin asignar',
-                    activity: 'Activo',
-                    config_json: '{}',
-                    last_sync: now,
-                    is_synced: 0, 
-                    updated_at: now, 
-                };
-                await saveSensor(newSensor);
+                try {
+                    // 1. Consultamos a Supabase si existe (usando cleanId)
+                    const { data: cloudDevice, error } = await supabase
+                        .from('devices')
+                        .select('*')
+                        .eq('id', cleanId)
+                        .single();
+
+                    if (cloudDevice && !error) {
+                        // CASO A: YA EXISTE EN NUBE -> DESCARGAMOS DATOS
+                        console.log("[Onboarding] Encontrado en nube. Descargando...");
+                        newSensorData = {
+                            id: cloudDevice.id,
+                            alias: cloudDevice.alias,
+                            type: cloudDevice.type,
+                            location: cloudDevice.name_farm,
+                            activity: cloudDevice.activity,
+                            lat: cloudDevice.lat,
+                            lng: cloudDevice.lng,
+                            config_json: JSON.stringify(cloudDevice.config),
+                            is_synced: 1, // Ya está sincronizado
+                            updated_at: cloudDevice.created_at,
+                            last_sync: new Date().toISOString()
+                        };
+                        isFromCloud = true;
+                    } else {
+                        throw new Error("No existe en nube");
+                    }
+
+                } catch (_) {
+                    // CASO B: NO EXISTE EN NUBE -> CREAMOS LOCAL
+                    console.log("[Onboarding] Creando Localmente.");
+                    const dbType = item.type === 'UNKNOWN' ? 'B01' : item.type;
+                    const now = new Date().toISOString();
+
+                    newSensorData = {
+                        id: cleanId, // Guardamos ID limpio
+                        alias: item.name, 
+                        type: dbType, 
+                        location: 'Sin asignar', 
+                        activity: 'Activo',
+                        config_json: '{}',
+                        last_sync: now,
+                        is_synced: 0, // Pendiente de subir
+                        updated_at: now, 
+                    };
+                    isFromCloud = false;
+                }
+
+                // 2. Guardamos en SQLite
+                await saveSensor(newSensorData, isFromCloud);
+                
+                // 3. Push inmediato si es local
+                if (!isFromCloud) {
+                    syncService.pushChanges().catch(e => console.log("Push background err:", e));
+                }
+
                 await loadSensorsFromDB(); 
             }
-            // Navegar según tipo
+            
+            setOnboardingStatus(null); 
+            
+            // Navegar usando cleanId
             if (item.type === 'N01') {
-                router.push(`/gateway/${item.id}/dashboard`);
+                router.push(`/gateway/${cleanId}/dashboard`);
             } else {
-                router.push(`/sensor/${item.id}/dashboard`);
+                router.push(`/sensor/${cleanId}/dashboard`);
             }
         } catch (error) {
+            setOnboardingStatus(null);
             console.log("Error conectando:", error);
+            alert("No se pudo conectar con el sensor. Intenta acercarte más.");
         }
     }
     else if (item.isSaved) {
-        // OFFLINE
+        // OFFLINE (Historial)
+        // El item.id ya viene de la DB (por ende ya está limpio), pero por seguridad usamos el ID del item
         if (item.type === 'N01') {
              router.push(`/gateway/${item.id}/dashboard`);
         } else {
@@ -200,7 +284,7 @@ export default function HomeScreen() {
     const typeMap: Record<string, { icon: string; bg: string; iconColor: string; label: string }> = {
       B01: { icon: 'sprout', bg: '#e3f2fd', iconColor: Colors.primary, label: 'Sensor Suelo (B01)' },
       C01: { icon: 'weather-partly-cloudy', bg: '#fff3e0', iconColor: Colors.secondary, label: 'Estación Climática (C01)' },
-      N01: { icon: 'router-wireless', bg: '#e8f5e9', iconColor: '#2e7d32', label: 'Gateway LoRa (N01)' }, // Nuevo Estilo
+      N01: { icon: 'router-wireless', bg: '#e8f5e9', iconColor: '#2e7d32', label: 'Gateway LoRa (N01)' },
       UNKNOWN: { icon: 'chip-outline', bg: '#f3f4f6', iconColor: Colors.textSecondary, label: 'Dispositivo Desconocido' }
     };
 
@@ -213,7 +297,7 @@ export default function HomeScreen() {
       else signalColor = Colors.error;
     }
 
-    const disabled = ( !item.isSaved && isOffline ) || isBusy;
+    const disabled = ( !item.isSaved && isOffline ) || isBusy || isSyncing;
 
     return (
       <TouchableOpacity
@@ -241,7 +325,7 @@ export default function HomeScreen() {
 
           <View style={styles.signalRow}>
             {isOffline ? (
-                <Text style={styles.offlineText}>• Sin señal (Offline)</Text>
+                <Text style={styles.offlineText}>• Sin señal (Historial Offline)</Text>
             ) : (
                 <>
                     <MaterialCommunityIcons name="signal" size={14} color={signalColor} />
@@ -260,18 +344,23 @@ export default function HomeScreen() {
   return (
     <View style={[styles.container, { paddingTop: insets.top }]}>
       
+      {/* HEADER LIMPIO */}
       <View style={styles.header}>
         <View>
-          <Text style={styles.appTitle}>Mis Sensores</Text>
-          <Text style={styles.headerSub}>
-            {isScanning ? 'Buscando dispositivos...' : 'Escaneo pausado'}
-          </Text>
+          <Text style={styles.appTitle}>Sensores</Text>
+          <View style={{flexDirection:'row', alignItems:'center'}}>
+              <Text style={styles.headerSub}>
+                {isScanning ? 'Buscando dispositivos...' : 'Escaneo pausado'}
+              </Text>
+              {isSyncing && <ActivityIndicator size="small" color={Colors.primary} style={{marginLeft: 10}}/>}
+          </View>
         </View>
         
+        {/* BOTÓN CON ÍCONO BLUETOOTH */}
         <TouchableOpacity
             style={[styles.scanButton, isScanning && styles.scanningBtn]}
             onPress={() => {
-                if (isBusy) return; 
+                if (isBusy || isSyncing) return; 
                 if (isScanning) stopScan();
                 else {
                     clearScannedDevices(); 
@@ -282,7 +371,7 @@ export default function HomeScreen() {
             {isScanning ? (
                 <ActivityIndicator color="#fff" size="small" />
             ) : (
-                <MaterialCommunityIcons name="radar" size={20} color="#fff" />
+                <MaterialCommunityIcons name="bluetooth" size={24} color="#fff" />
             )}
         </TouchableOpacity>
       </View>
@@ -300,15 +389,15 @@ export default function HomeScreen() {
                 {isScanning ? "Esperando sensores..." : "No se encontraron sensores cercanos."}
             </Text>
              {!isScanning && savedSensors.length === 0 && (
-                 <Text style={{fontSize: 12, color: '#aaa', marginTop: 5}}>Pulsa el radar para buscar</Text>
+                 <Text style={{fontSize: 12, color: '#aaa', marginTop: 5}}>Pulsa el botón Bluetooth para buscar</Text>
             )}
           </View>
         }
       />
 
       <LoadingOverlay 
-        visible={isBusy} 
-        message="Procesando conexión..." 
+        visible={isBusy || isSyncing || !!onboardingStatus} 
+        message={onboardingStatus || (isSyncing ? "Sincronizando..." : "Conectando...")} 
       />
 
     </View>
@@ -316,7 +405,6 @@ export default function HomeScreen() {
 }
 
 const styles = StyleSheet.create({
-  // ... (Tus estilos se mantienen igual) ...
   container: { flex: 1, backgroundColor: '#f8f9fa' },
   header: {
     paddingHorizontal: 24, paddingVertical: 20, backgroundColor: '#fff',
@@ -327,7 +415,7 @@ const styles = StyleSheet.create({
   appTitle: { fontSize: 28, fontWeight: 'bold', color: Colors.textPrimary },
   headerSub: { fontSize: 14, color: Colors.textSecondary, marginTop: 4 },
   scanButton: {
-    width: 44, height: 44, borderRadius: 22,
+    width: 48, height: 48, borderRadius: 24,
     backgroundColor: Colors.primary,
     justifyContent: 'center', alignItems: 'center', elevation: 2
   },
@@ -356,7 +444,7 @@ const styles = StyleSheet.create({
       backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'center', alignItems: 'center', zIndex: 999
   },
   loadingBox: {
-      width: 200, padding: 20, backgroundColor: '#fff', borderRadius: 16, alignItems: 'center', elevation: 10
+      width: 220, padding: 24, backgroundColor: '#fff', borderRadius: 16, alignItems: 'center', elevation: 10
   },
-  loadingText: { marginTop: 10, fontSize: 16, fontWeight: 'bold', color: Colors.textPrimary }
+  loadingText: { marginTop: 12, fontSize: 16, fontWeight: 'bold', color: Colors.textPrimary, textAlign: 'center' }
 });
