@@ -7,16 +7,12 @@
     "icon": "./assets/images/icon.png",
     "scheme": "sensorapp",
     "userInterfaceStyle": "light",
-
-    // La pantalla de carga nativa (el segundo que tarda en abrir)
     "splash": {
       "image": "./assets/images/splash.png",
       "resizeMode": "contain",
       "backgroundColor": "#ffffff"
     },
-
     "newArchEnabled": true,
-
     "ios": {
       "supportsTablet": true
     },
@@ -52,6 +48,12 @@
     "experiments": {
       "typedRoutes": true,
       "reactCompiler": true
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "774c2479-0afa-410e-945b-9dba254d7924"
+      }
     }
   }
 }
