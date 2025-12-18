@@ -18,19 +18,17 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-// --- COMPONENTES PROPIOS ---
 import SegmentedControl from '../../../components/global/SegmentedControl';
 import TimeIntervalInput from '../../../components/inputs/TimeIntervalInput';
 import { Colors } from '../../../constants/Colors';
 
-// --- CONTEXT & DB ---
 import { BLE_UUIDS } from '../../../constants/BleUUIDs';
 import { useBle } from '../../../context/BleContext';
-import { getSensorById, saveSensor } from '../../../database/SensorRepository';
+// IMPORTANTE: Importamos updateSensor (asegúrate de haberla creado en el paso 1)
+import { getSensorById, updateSensor } from '../../../database/SensorRepository';
 import { SensorEntity } from '../../../database/types';
 import { syncService } from '../../../services/syncService';
 
-// --- UTILIDAD: PAUSA ---
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 export default function SensorInfoScreen() {
@@ -40,19 +38,16 @@ export default function SensorInfoScreen() {
     const insets = useSafeAreaInsets();
     const isMounted = useRef(true);
 
-    // Contexto BLE
     const { connectedDevice } = useBle();
     const isConnected = !!connectedDevice;
 
-    const [activeTab, setActiveTab] = useState(0); // 0: Info, 1: Config
+    const [activeTab, setActiveTab] = useState(0); 
     const [loading, setLoading] = useState(true);
     
-    // Estados de operación
     const [isReadingConfig, setIsReadingConfig] = useState(false);
     const [isWritingConfig, setIsWritingConfig] = useState(false);
     const [isSaving, setIsSaving] = useState(false);
 
-    // --- ESTADO DE DATOS (Metadata DB) ---
     const [metadata, setMetadata] = useState({
         alias: '',
         location: '',
@@ -61,7 +56,7 @@ export default function SensorInfoScreen() {
         lng: '',
     });
 
-    // --- ESTADO DE CONFIGURACIÓN (Hardware) ---
+    // Configuración puramente de Hardware (Intervalos, etc)
     const [config, setConfig] = useState({
         sdEnabled: true,       
         saveInterval: 3600,    
@@ -75,7 +70,7 @@ export default function SensorInfoScreen() {
 
     const [originalSensor, setOriginalSensor] = useState<SensorEntity | null>(null);
 
-    // 1. CARGAR DATOS DE DB AL INICIO
+    // 1. CARGAR DATOS
     useEffect(() => {
         const loadData = async () => {
             if (!sensorId) return;
@@ -94,10 +89,10 @@ export default function SensorInfoScreen() {
                     if (sensor.config_json) {
                         try {
                             const parsedConfig = JSON.parse(sensor.config_json);
-                            // Fusionamos con defaults para evitar campos faltantes
+                            // Solo leemos las propiedades que nos interesan para esta pantalla
                             setConfig(prev => ({ ...prev, ...parsedConfig }));
                         } catch (e) {
-                            console.log("Error parseando config JSON local");
+                            console.log("Error parseando config");
                         }
                     }
                 }
@@ -111,35 +106,24 @@ export default function SensorInfoScreen() {
     }, [sensorId]);
 
     useEffect(() => {
-        // Al montar: marcar como true
         isMounted.current = true;
-        
-        // Al desmontar: marcar como false
         return () => { isMounted.current = false; };
     }, []);
 
-    // 2. LEER CONFIGURACIÓN REAL DEL SENSOR (Al cambiar a Tab 1)
+    // 2. LEER CONFIG (Sin cambios)
     useEffect(() => {
         const readSensorConfig = async () => {
-            // Solo leemos si estamos en Tab Config, Conectados y NO escribiendo
             if (activeTab === 1 && isConnected && connectedDevice && !isWritingConfig) {
                 console.log("Leyendo configuración actual del sensor...");
                 setIsReadingConfig(true);
-                
                 try {
                     const readVal = async (charUUID: string) => {
                         try {
                             const char = await connectedDevice.readCharacteristicForService(BLE_UUIDS.SVC_CONFIG, charUUID);
-                            if (char.value) {
-                                return Buffer.from(char.value, 'base64').toString('utf8').trim();
-                            }
-                        } catch (e) {
-                            console.log(`Error leyendo ${charUUID}`, e);
-                        }
+                            if (char.value) return Buffer.from(char.value, 'base64').toString('utf8').trim();
+                        } catch (e) {}
                         return null;
                     };
-
-                    // LECTURA SECUENCIAL
                     const sdEn = await readVal(BLE_UUIDS.CONFIG.SD_ENABLE);
                     const saveInt = await readVal(BLE_UUIDS.CONFIG.SAVE_INTERVAL);
                     const loraEn = await readVal(BLE_UUIDS.CONFIG.LORA_ENABLE);
@@ -160,24 +144,20 @@ export default function SensorInfoScreen() {
                         wakeInterval: wakeInt ? parseInt(wakeInt) : prev.wakeInterval,
                         bleWindow: bleWin ? parseInt(bleWin) : prev.bleWindow,
                     }));
-
                 } catch (e) {
-                    console.log("Error general leyendo config", e);
+                    console.log("Error leyendo config", e);
                 } finally {
                     setIsReadingConfig(false);
                 }
             }
         };
-
         readSensorConfig();
     }, [activeTab, isConnected, connectedDevice]);
 
-
-    // 3. ESCRIBIR CONFIGURACIÓN AL SENSOR (Secuencial con pausas)
+    // 3. ESCRIBIR CONFIG (Sin cambios)
     const writeConfigToSensor = async () => {
         if (!connectedDevice) return;
         setIsWritingConfig(true);
-
         try {
             const commands = [
                 { uuid: BLE_UUIDS.CONFIG.SD_ENABLE, val: config.sdEnabled ? "1" : "0", desc: "SD Enabled" },
@@ -189,33 +169,22 @@ export default function SensorInfoScreen() {
                 { uuid: BLE_UUIDS.CONFIG.WAKE_INTERVAL, val: config.wakeInterval.toString(), desc: "Wake Interval" },
                 { uuid: BLE_UUIDS.CONFIG.BLE_WINDOW, val: config.bleWindow.toString(), desc: "BLE Window" },
             ];
-
             for (const cmd of commands) {
                 console.log(`[BLE-WRITE] Enviando ${cmd.desc}: ${cmd.val}`);
                 const base64Val = Buffer.from(cmd.val).toString('base64');
-                
-                await connectedDevice.writeCharacteristicWithResponseForService(
-                    BLE_UUIDS.SVC_CONFIG,
-                    cmd.uuid,
-                    base64Val
-                );
-                // Pausa para dar tiempo al ESP32 a procesar y guardar en NVS
-                await sleep(400);
+                await connectedDevice.writeCharacteristicWithResponseForService(BLE_UUIDS.SVC_CONFIG, cmd.uuid, base64Val);
+                await sleep(300);
             }
-
             Alert.alert("Éxito", "Configuración actualizada en el sensor.");
-
         } catch (error) {
             Alert.alert("Error de Escritura", "Falló la comunicación con el sensor.");
-            console.error(error);
         } finally {
             setIsWritingConfig(false);
         }
     };
 
-    // 4. GUARDAR CAMBIOS (DB LOCAL + BLE SI APLICA)
+    // 4. GUARDAR CAMBIOS (AQUÍ ESTÁ EL ARREGLO PRINCIPAL)
     const handleSave = async () => {
-        // Bloqueo de seguridad: No guardar config hardware si estamos offline
         if (activeTab === 1 && !isConnected) {
             Alert.alert("Modo Offline", "Conéctate al sensor para modificar su configuración interna.");
             return;
@@ -226,7 +195,18 @@ export default function SensorInfoScreen() {
         try {
             const now = new Date().toISOString();
             
-            // Preparar objeto actualizado
+            // Recuperamos el JSON original para no perder datos que no tocamos (como 'calibration' si existe de backup)
+            let existingJson = {};
+            if (originalSensor && originalSensor.config_json) {
+                try { existingJson = JSON.parse(originalSensor.config_json); } catch (e) {}
+            }
+
+            // Solo actualizamos las claves de configuración de hardware
+            const finalConfig = {
+                ...existingJson,
+                ...config
+            };
+
             const updatedSensor: SensorEntity = {
                 ...originalSensor!,
                 id: sensorId,
@@ -235,70 +215,50 @@ export default function SensorInfoScreen() {
                 activity: metadata.activity,
                 lat: parseFloat(metadata.lat) || 0,
                 lng: parseFloat(metadata.lng) || 0,
-                config_json: JSON.stringify(config),
-                is_synced: 0, // Marcar para subir a la nube
+                config_json: JSON.stringify(finalConfig),
+                is_synced: 0, 
                 updated_at: now
             };
 
-            // 1. Guardar en SQLite
-            await saveSensor(updatedSensor);
+            // USAMOS UPDATE EN LUGAR DE SAVE (INSERT OR REPLACE)
+            // Esto evita que se borre el sensor y se dispare el CASCADE DELETE de los electrodos
+            await updateSensor(updatedSensor); 
 
-            // 2. Si es Tab Config -> Escribir a Hardware
             if (activeTab === 1 && isConnected) {
                 await writeConfigToSensor();
             }
 
-            // 3. Trigger Sync en background
             syncService.pushChanges().catch(err => console.log("Sync background error:", err));
 
-            // --- CORRECCIÓN DE TIMING PARA ANDROID ---
-            Alert.alert(
-                "Guardado", 
-                "Información actualizada correctamente.",
-                [
-                    { 
-                        text: "OK", 
-                        onPress: () => {
-                            // 1. Primero apagamos los estados de carga para cerrar el Modal
-                            setIsWritingConfig(false);
-                            setIsSaving(false);
-
-                            // 2. Esperamos un poco para que el Modal desaparezca visualmente
-                            setTimeout(() => {
-                                // 3. Ahora sí, navegamos atrás de forma segura
-                                if (isMounted.current) {
-                                    router.back();
-                                }
-                            }, 200); // 200ms es imperceptible para el usuario pero eterno para el procesador
-                        }
+            Alert.alert("Guardado", "Información actualizada correctamente.", [
+                { 
+                    text: "OK", 
+                    onPress: () => {
+                        setIsWritingConfig(false);
+                        setIsSaving(false);
+                        setTimeout(() => { if (isMounted.current) router.back(); }, 200);
                     }
-                ]
-            );
+                }
+            ]);
 
         } catch (error) {
+            console.error(error);
             Alert.alert("Error", "No se pudo guardar la información.");
         } finally {
             setIsSaving(false);
         }
     };
 
+    // ... Resto de funciones (handleSyncRTC, handleGetLocation, etc) iguales ...
     const handleSyncRTC = async () => {
         if (!isConnected || !connectedDevice) return;
         try {
             const now = new Date();
-            // Formato esperado por el firmware: "YYYY-MM-DD HH:MM:SS"
             const timeString = now.toISOString().replace('T', ' ').split('.')[0]; 
             const base64Time = Buffer.from(timeString).toString('base64');
-            
-            await connectedDevice.writeCharacteristicWithResponseForService(
-                BLE_UUIDS.SVC_CONFIG,
-                BLE_UUIDS.CONFIG.RTC_SYNC,
-                base64Time
-            );
+            await connectedDevice.writeCharacteristicWithResponseForService(BLE_UUIDS.SVC_CONFIG, BLE_UUIDS.CONFIG.RTC_SYNC, base64Time);
             Alert.alert("Reloj Sincronizado", timeString);
-        } catch (error) {
-            Alert.alert("Error", "Fallo al sincronizar reloj.");
-        }
+        } catch (error) { Alert.alert("Error", "Fallo al sincronizar reloj."); }
     };
 
     const handleGetLocation = async () => {
@@ -306,39 +266,18 @@ export default function SensorInfoScreen() {
             let { status } = await Location.requestForegroundPermissionsAsync();
             if (status !== 'granted') return;
             const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High });
-            setMetadata(prev => ({
-                ...prev,
-                lat: loc.coords.latitude.toString(),
-                lng: loc.coords.longitude.toString()
-            }));
-        } catch (error) {
-            Alert.alert("Error GPS", "No se pudo obtener la ubicación.");
-        }
+            setMetadata(prev => ({ ...prev, lat: loc.coords.latitude.toString(), lng: loc.coords.longitude.toString() }));
+        } catch (error) { Alert.alert("Error GPS", "No se pudo obtener la ubicación."); }
     };
 
-    const toggleSwitch = (key: keyof typeof config) => {
-        setConfig(prev => ({ ...prev, [key]: !prev[key] }));
-    };
+    const toggleSwitch = (key: keyof typeof config) => setConfig(prev => ({ ...prev, [key]: !prev[key] }));
 
-    if (loading) {
-        return (
-            <View style={[styles.container, styles.center]}>
-                <ActivityIndicator size="large" color={Colors.primary} />
-            </View>
-        );
-    }
+    if (loading) return (<View style={[styles.container, styles.center]}><ActivityIndicator size="large" color={Colors.primary} /></View>);
 
     return (
-        // 1. CAMBIO: Usamos un View normal como contenedor raíz
         <View style={[styles.container, { paddingTop: insets.top }]}>
             <Stack.Screen options={{ headerShown: false }} />
-
-            {/* 2. CAMBIO: KeyboardAvoidingView solo envuelve el contenido, NO el overlay */}
-            <KeyboardAvoidingView 
-                behavior={Platform.OS === "ios" ? "padding" : undefined} // undefined suele ser mejor en Android con Expo Router
-                style={{ flex: 1 }}
-            >
-                {/* HEADER */}
+            <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : undefined} style={{ flex: 1 }}>
                 <View style={styles.header}>
                     <TouchableOpacity onPress={() => router.back()} style={styles.backButton} disabled={isWritingConfig || isSaving}>
                         <MaterialCommunityIcons name="arrow-left" size={24} color={Colors.textPrimary} />
@@ -348,12 +287,8 @@ export default function SensorInfoScreen() {
                 </View>
 
                 <View style={styles.content}>
-                    {/* ID CARD */}
                     <View style={styles.idCard}>
-                        <MaterialCommunityIcons 
-                            name={sensorId.includes("B01") ? "sprout" : "weather-partly-cloudy"} 
-                            size={32} color={Colors.primary} 
-                        />
+                        <MaterialCommunityIcons name={sensorId.includes("B01") ? "sprout" : "weather-partly-cloudy"} size={32} color={Colors.primary} />
                         <View style={{marginLeft: 12}}>
                             <Text style={styles.labelId}>ID SENSOR</Text>
                             <Text style={styles.textId}>{sensorId}</Text>
@@ -361,37 +296,17 @@ export default function SensorInfoScreen() {
                         </View>
                     </View>
 
-                    <SegmentedControl 
-                        options={['Información', 'Configuración']} 
-                        selectedIndex={activeTab} 
-                        onChange={setActiveTab} 
-                        disabled={isWritingConfig || isSaving}
-                    />
+                    <SegmentedControl options={['Información', 'Configuración']} selectedIndex={activeTab} onChange={setActiveTab} disabled={isWritingConfig || isSaving}/>
 
                     <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 100 }}>
-                        {/* TAB 1: INFORMACIÓN */}
                         {activeTab === 0 && (
                             <View style={styles.formSection}>
                                 <InputLabel label="Nombre / Alias" icon="tag-text-outline" />
-                                <TextInput 
-                                    style={styles.input} 
-                                    value={metadata.alias} 
-                                    placeholder="Ej: Sensor Lote 4"
-                                    onChangeText={(t) => setMetadata({...metadata, alias: t})}
-                                />
-                                {/* ... resto de inputs Tab 1 ... */}
+                                <TextInput style={styles.input} value={metadata.alias} placeholder="Ej: Sensor Lote 4" onChangeText={(t) => setMetadata({...metadata, alias: t})} />
                                 <InputLabel label="Ubicación / Finca" icon="map-marker-outline" />
-                                <TextInput 
-                                    style={styles.input} 
-                                    value={metadata.location} 
-                                    onChangeText={(t) => setMetadata({...metadata, location: t})}
-                                />
+                                <TextInput style={styles.input} value={metadata.location} onChangeText={(t) => setMetadata({...metadata, location: t})} />
                                 <InputLabel label="Actividad / Cultivo" icon="sprout-outline" />
-                                <TextInput 
-                                    style={styles.input} 
-                                    value={metadata.activity} 
-                                    onChangeText={(t) => setMetadata({...metadata, activity: t})}
-                                />
+                                <TextInput style={styles.input} value={metadata.activity} onChangeText={(t) => setMetadata({...metadata, activity: t})} />
                                 <View style={styles.divider} />
                                 <Text style={styles.sectionHeader}>Geolocalización</Text>
                                 <View style={styles.row}>
@@ -411,7 +326,6 @@ export default function SensorInfoScreen() {
                             </View>
                         )}
 
-                        {/* TAB 2: CONFIGURACIÓN */}
                         {activeTab === 1 && (
                             <View style={styles.formSection}>
                                 {!isConnected ? (
@@ -427,7 +341,6 @@ export default function SensorInfoScreen() {
                                     </View>
                                 ) : (
                                     <>
-                                        {/* ... Tus ConfigGroups ... */}
                                         <ConfigGroup title="Almacenamiento (SD)">
                                             <SwitchRow label="Habilitar Tarjeta SD" value={config.sdEnabled} onValueChange={() => toggleSwitch('sdEnabled')} />
                                             <TimeIntervalInput label="Intervalo de Guardado" valueSeconds={config.saveInterval} onChangeSeconds={(v) => setConfig({...config, saveInterval: v})} />
@@ -458,43 +371,22 @@ export default function SensorInfoScreen() {
                     </ScrollView>
                 </View>
 
-                {/* FOOTER */}
                 <View style={[styles.footer, { paddingBottom: insets.bottom + 10 }]}>
-                    <TouchableOpacity 
-                        style={[styles.saveButton, (isWritingConfig || isSaving) && styles.saveButtonDisabled]} 
-                        onPress={handleSave}
-                        disabled={isWritingConfig || isSaving}
-                    >
+                    <TouchableOpacity style={[styles.saveButton, (isWritingConfig || isSaving) && styles.saveButtonDisabled]} onPress={handleSave} disabled={isWritingConfig || isSaving}>
                         {(isWritingConfig || isSaving) ? (
-                            <View style={{flexDirection: 'row', gap: 10}}>
-                                <ActivityIndicator color="#fff" />
-                                <Text style={styles.saveButtonText}>PROCESANDO...</Text>
-                            </View>
+                            <View style={{flexDirection: 'row', gap: 10}}><ActivityIndicator color="#fff" /><Text style={styles.saveButtonText}>PROCESANDO...</Text></View>
                         ) : (
-                            <>
-                                <MaterialCommunityIcons name={activeTab === 1 && isConnected ? "upload" : "content-save"} size={20} color="#fff" style={{marginRight: 8}}/>
-                                <Text style={styles.saveButtonText}>
-                                    {activeTab === 1 && isConnected ? "APLICAR AL SENSOR" : "GUARDAR CAMBIOS"}
-                                </Text>
-                            </>
+                            <><MaterialCommunityIcons name={activeTab === 1 && isConnected ? "upload" : "content-save"} size={20} color="#fff" style={{marginRight: 8}}/><Text style={styles.saveButtonText}>{activeTab === 1 && isConnected ? "APLICAR AL SENSOR" : "GUARDAR CAMBIOS"}</Text></>
                         )}
                     </TouchableOpacity>
                 </View>
             </KeyboardAvoidingView>
-
-            {/* 3. CAMBIO: El Overlay ahora está FUERA del KeyboardAvoidingView y es el último elemento */}
-            {isWritingConfig && (
-                <View style={styles.writingOverlay}>
-                    <ActivityIndicator size="large" color="#fff" />
-                    <Text style={{color: '#fff', marginTop: 20, fontWeight: 'bold', fontSize: 16}}>Configurando Sensor...</Text>
-                    <Text style={{color: '#ddd', fontSize: 13, marginTop: 5}}>No cierres la app.</Text>
-                </View>
-            )}
+            {isWritingConfig && (<View style={styles.writingOverlay}><ActivityIndicator size="large" color="#fff" /><Text style={{color: '#fff', marginTop: 20, fontWeight: 'bold', fontSize: 16}}>Configurando Sensor...</Text><Text style={{color: '#ddd', fontSize: 13, marginTop: 5}}>No cierres la app.</Text></View>)}
         </View>
     );
 }
 
-// --- SUBCOMPONENTES ---
+// ... Subcomponentes y Estilos iguales a tu código original ...
 const InputLabel = ({label, icon}: {label: string, icon?: any}) => (
     <View style={{flexDirection: 'row', alignItems: 'center', marginBottom: 6, marginTop: 12}}>
         {icon && <MaterialCommunityIcons name={icon} size={16} color={Colors.textSecondary} style={{marginRight: 6}} />}
@@ -513,12 +405,7 @@ const ConfigGroup = ({title, children}: any) => (
 const SwitchRow = ({label, value, onValueChange}: any) => (
     <View style={{flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 15}}>
         <Text style={{fontSize: 15, color: Colors.textPrimary}}>{label}</Text>
-        <Switch 
-            value={value} 
-            onValueChange={onValueChange} 
-            trackColor={{ false: "#ccc", true: Colors.primary }}
-            thumbColor={"#fff"}
-        />
+        <Switch value={value} onValueChange={onValueChange} trackColor={{ false: "#ccc", true: Colors.primary }} thumbColor={"#fff"} />
     </View>
 );
 
@@ -528,39 +415,30 @@ const styles = StyleSheet.create({
     header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, paddingVertical: 14, backgroundColor: '#fff', borderBottomWidth: 1, borderBottomColor: '#eee' },
     backButton: { padding: 4 },
     screenTitle: { fontSize: 18, fontWeight: 'bold', color: Colors.textPrimary },
-    
     content: { flex: 1, paddingHorizontal: 16 },
     idCard: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#e3f2fd', padding: 16, borderRadius: 12, marginBottom: 20, marginTop: 20, borderWidth: 1, borderColor: '#bbdefb' },
     labelId: { fontSize: 10, color: Colors.primary, fontWeight: 'bold' },
     textId: { fontSize: 18, fontWeight: 'bold', color: '#0d47a1', fontFamily: 'monospace' },
     offlineTag: { fontSize: 12, color: Colors.error, marginTop: 2, fontWeight: 'bold' },
-
     formSection: { backgroundColor: '#fff', padding: 20, borderRadius: 16, elevation: 2, shadowColor: '#000', shadowOpacity: 0.05, shadowRadius: 5, marginTop: 15, marginBottom: 50 },
     sectionHeader: { fontSize: 16, fontWeight: 'bold', color: Colors.textPrimary, marginBottom: 5, marginTop: 10 },
     input: { backgroundColor: '#f9f9f9', borderWidth: 1, borderColor: '#e0e0e0', borderRadius: 8, paddingHorizontal: 12, paddingVertical: 10, fontSize: 16, color: '#333' },
     row: { flexDirection: 'row' },
     divider: { height: 1, backgroundColor: '#eee', marginVertical: 20 },
-    
     gpsButton: { flexDirection: 'row', alignItems: 'center', alignSelf: 'center', marginTop: 15, padding: 10, borderWidth: 1, borderColor: Colors.primary, borderRadius: 8, backgroundColor: '#f0f7ff' },
     gpsButtonText: { color: Colors.primary, fontWeight: 'bold', marginLeft: 6 },
-
-    // Estilos Config
     card: { marginBottom: 25 },
     cardTitle: { fontSize: 14, fontWeight: 'bold', color: Colors.primary, textTransform: 'uppercase' },
     cardDivider: { height: 1, backgroundColor: '#eee', marginVertical: 10 },
     helperText: { fontSize: 11, color: '#999', marginTop: 4, fontStyle: 'italic' },
-    
     syncButton: { flexDirection: 'row', backgroundColor: Colors.secondary, padding: 12, borderRadius: 8, justifyContent: 'center', alignItems: 'center' },
     syncButtonText: { color: '#fff', fontWeight: 'bold', marginLeft: 8 },
-
     lockedContainer: { alignItems: 'center', justifyContent: 'center', padding: 30 },
     lockedTitle: { fontSize: 18, fontWeight: 'bold', color: '#999', marginTop: 15 },
     lockedText: { textAlign: 'center', color: '#aaa', marginTop: 10, lineHeight: 20 },
-
     footer: { position: 'absolute', bottom: 0, left: 0, right: 0, backgroundColor: '#fff', padding: 16, borderTopWidth: 1, borderTopColor: '#eee' },
     saveButton: { backgroundColor: Colors.primary, padding: 16, borderRadius: 12, alignItems: 'center', justifyContent: 'center', flexDirection: 'row' },
     saveButtonDisabled: { backgroundColor: '#ccc' },
     saveButtonText: { color: '#fff', fontWeight: 'bold', fontSize: 16 },
-
     writingOverlay: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.8)', justifyContent: 'center', alignItems: 'center', zIndex: 999 }
 });

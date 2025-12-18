@@ -96,3 +96,33 @@ export const countSensors = async (): Promise<number> => {
         return 0;
     }
 };
+
+export const updateSensor = async (sensor: SensorEntity) => {
+  const query = `
+    UPDATE sensors 
+    SET 
+      alias = ?, 
+      type = ?, 
+      location = ?, 
+      activity = ?, 
+      lat = ?, 
+      lng = ?, 
+      config_json = ?, 
+      is_synced = ?, 
+      updated_at = ?
+    WHERE id = ?;
+  `;
+  
+  await db.runAsync(query, [
+    sensor.alias || '',
+    sensor.type || '',
+    sensor.location || '',
+    sensor.activity || '',
+    sensor.lat ?? 0,
+    sensor.lng ?? 0,
+    sensor.config_json || '',
+    sensor.is_synced ?? 0,
+    sensor.updated_at || new Date().toISOString(),
+    sensor.id
+  ]);
+};

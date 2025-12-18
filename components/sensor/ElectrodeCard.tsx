@@ -2,137 +2,164 @@ import { MaterialCommunityIcons } from '@expo/vector-icons';
 import React from 'react';
 import { StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { Colors } from '../../constants/Colors';
-import { GlobalStyles } from '../../constants/GlobalStyles';
 
-interface Props {
+interface ElectrodeCardProps {
   number: 1 | 2 | 3;
   depthCm: number;
-  volumetricMoisture: number;
-  gravimetricMoisture?: number;
-  voltageMv: number| string;
+  voltageMv: number;
+  volumetricMoisture: number; // Hv
+  gravimetricMoisture?: number; // Hg (NUEVO)
   isCalibrated: boolean;
-  disabled?: boolean;
+  texture: string;
   onCalibratePress: () => void;
-  texture?: string;
-  
+  disabled?: boolean;
 }
 
 export default function ElectrodeCard({
   number,
   depthCm,
-  volumetricMoisture,
-  gravimetricMoisture,
   voltageMv,
+  volumetricMoisture,
+  gravimetricMoisture = 0, // Default 0
   isCalibrated,
+  texture,
   onCalibratePress,
-  texture
-}: Props) {
+  disabled
+}: ElectrodeCardProps) {
   
-  const displayHv = isCalibrated ? volumetricMoisture.toFixed(1) : '--.-';
-  const displayHg = isCalibrated && gravimetricMoisture ? gravimetricMoisture.toFixed(1) + '%' : '-- %';
+  // Colores dinámicos según humedad
+  const getMoistureColor = (val: number) => {
+    if (!isCalibrated) return '#999';
+    if (val < 10) return '#e21e08ff'; // Seco
+    if (val < 30) return '#eede04ff'; // Medio
+    return '#098a3fff'; // Húmedo
+  };
 
   return (
-    <View style={[GlobalStyles.card, styles.cardNoMargin]}>
-      {/* HEADER */}
-      <View style={styles.cardHeader}>
-        <Text style={styles.headerTitle}>ELECTRODO {number}</Text>
-        <TouchableOpacity onPress={onCalibratePress} style={styles.calButton}>
-          <MaterialCommunityIcons name="tune" size={14} color={Colors.primary} />
-          <Text style={styles.calText}>Calibrar</Text>
+    <View style={styles.card}>
+      {/* HEADER: Número y Profundidad */}
+      <View style={styles.header}>
+        <View style={styles.badgeContainer}>
+          <View style={[styles.badge, { backgroundColor: Colors.primary }]}>
+            <Text style={styles.badgeText}>E{number}</Text>
+          </View>
+          <Text style={styles.depthText}>{depthCm > 0 ? `${depthCm} cm` : '-- cm'}</Text>
+        </View>
+        
+        {/* Botón Calibrar */}
+        <TouchableOpacity onPress={onCalibratePress} disabled={disabled}>
+          <MaterialCommunityIcons 
+            name="tune" 
+            size={20} 
+            color={disabled ? '#ccc' : Colors.primary} 
+          />
         </TouchableOpacity>
       </View>
 
-      {/* BODY */}
-      <View style={styles.cardBody}>
-        
-        {/* IZQUIERDA: Valor Gigante */}
-        <View style={styles.mainValueSection}>
-          <View style={styles.bigNumberContainer}>
-             {/* El Número Gigante */}
-            <Text style={styles.bigNumber}>{displayHv}</Text>
-            
-            {/* Unidad al pie del número (bottom) */}
-            <View style={{ marginBottom: 12 }}>
-               <Text style={styles.unitSymbol}>%Hv</Text>
-            </View>
+      <View style={styles.body}>
+        {/* COLUMNA IZQUIERDA: DATOS PRINCIPALES (Hv) */}
+        <View style={styles.mainData}>
+          <Text style={styles.label}>Humedad Volumétrica</Text>
+          <View style={styles.valueContainer}>
+            <MaterialCommunityIcons 
+              name="water-percent" 
+              size={32} // Icono un poco más chico
+              color={getMoistureColor(volumetricMoisture)} 
+            />
+            <Text style={[
+              styles.valueText, 
+              { color: Colors.textPrimary, fontWeight: 'bold' }
+            ]}>
+              {isCalibrated ? volumetricMoisture.toFixed(1) : "--"}
+              <Text style={styles.unitText}>%</Text>
+            </Text>
           </View>
           
-          {/* Advertencia SOLO si no está calibrado */}
-          {!isCalibrated && (
-            <Text style={styles.notCalibratedWarning}>⚠️ Sin Calibrar</Text>
-          )}
+          {/* NUEVO: DATO SECUNDARIO (Hg) */}
+          <View style={styles.secondaryRow}>
+             <Text style={styles.secondaryLabel}>Gravimétrica (Hg): </Text>
+             <Text style={styles.secondaryValue}>
+                {isCalibrated ? gravimetricMoisture.toFixed(1) : "--"} %
+             </Text>
+          </View>
         </View>
 
-        {/* DERECHA: Detalles */}
-        <View style={styles.detailsColumn}>
-          <DetailItem icon="arrow-expand-vertical" value={`${depthCm} cm`} label="Prof." />
-          <DetailItem icon="weight" value={displayHg} label="Hg" />
-          <DetailItem icon="flash" value={`${voltageMv}`} label="mV" color={Colors.textSecondary} />
+        {/* COLUMNA DERECHA: INFO TÉCNICA */}
+        <View style={styles.techData}>
+          <View style={styles.techItem}>
+            <Text style={styles.techLabel}>Voltaje</Text>
+            <Text style={styles.techValue}>{voltageMv.toFixed(0)} mV</Text>
+          </View>
+          <View style={styles.techItem}>
+            <Text style={styles.techLabel}>Suelo</Text>
+            <Text style={styles.techValue} numberOfLines={1}>{texture}</Text>
+          </View>
+          {!isCalibrated && (
+            <View style={styles.warningContainer}>
+              <Text style={styles.warningText}>Sin Calibrar</Text>
+            </View>
+          )}
         </View>
       </View>
     </View>
   );
 }
 
-const DetailItem = ({icon, value, label, color = Colors.textPrimary}: any) => (
-  <View style={styles.detailItem}>
-    <MaterialCommunityIcons name={icon} size={16} color={Colors.textSecondary} style={{width: 22}} />
-    <Text style={[styles.detailValue, {color}]}>
-      {value} <Text style={styles.detailLabel}>{label}</Text>
-    </Text>
-  </View>
-);
-
 const styles = StyleSheet.create({
-  cardNoMargin: { marginVertical: 6, padding: 0 }, 
-  cardHeader: {
-    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
-    paddingHorizontal: 16, paddingVertical: 8,
-    borderBottomWidth: 1, borderBottomColor: '#f0f0f0', backgroundColor: '#fafafa', borderTopLeftRadius: 10, borderTopRightRadius: 10
+  card: {
+    backgroundColor: '#fff',
+    borderRadius: 16,
+    padding: 16,
+    marginBottom: 12,
+    elevation: 2,
+    shadowColor: '#000',
+    shadowOpacity: 0.05,
+    shadowRadius: 4,
+    shadowOffset: { width: 0, height: 2 }
   },
-  headerTitle: { fontSize: 13, fontWeight: 'bold', color: Colors.textSecondary, letterSpacing: 1 },
-  calButton: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#eef6fc', paddingVertical: 4, paddingHorizontal: 8, borderRadius: 4 },
-  calText: { fontSize: 11, color: Colors.primary, marginLeft: 4, fontWeight: '600' },
+  header: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: '#f0f0f0',
+    paddingBottom: 8
+  },
+  badgeContainer: { flexDirection: 'row', alignItems: 'center' },
+  badge: {
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
+    marginRight: 8
+  },
+  badgeText: { color: '#fff', fontWeight: 'bold', fontSize: 12 },
+  depthText: { fontWeight: '600', color: '#555' },
   
-  cardBody: { flexDirection: 'row', padding: 16 },
+  body: { flexDirection: 'row' },
   
-  // SECCIÓN IZQUIERDA
-  mainValueSection: { 
-    flex: 3, 
-    justifyContent: 'center', 
-    alignItems: 'center', // Centramos el número en su bloque
-    paddingRight: 10 
-  },
-  bigNumberContainer: { 
-    flexDirection: 'row', 
-    alignItems: 'flex-end', // Alineamos el % a la base del número
-  },
-  bigNumber: { 
-    fontSize: 70, // Aumenté el tamaño para que impacte
-    fontWeight: 'bold', 
-    color: Colors.textPrimary, 
-    includeFontPadding: false,
-    lineHeight: 75,
-  },
-  unitSymbol: {
-    fontSize: 24, // Tamaño de la unidad
-    color: Colors.textSecondary,
-    fontWeight: 'bold',
-    marginLeft: 2,
-    marginBottom: 8 // Ajuste fino para que quede bien alineado con la base
-  },
-  notCalibratedWarning: { fontSize: 12, color: Colors.warning, marginTop: -5, fontWeight: 'bold' },
+  mainData: { flex: 1.2, paddingRight: 10, borderRightWidth: 1, borderRightColor: '#f0f0f0' },
+  label: { fontSize: 11, color: '#999', textTransform: 'uppercase', marginBottom: 4 },
+  valueContainer: { flexDirection: 'row', alignItems: 'flex-end', marginBottom: 8 }, // Flex-end alinea el % abajo
+  
+  // CAMBIO DE TAMAÑO DE FUENTE AQUÍ
+  valueText: { 
+      fontSize: 34, // Antes era más grande, reducido para que quepan 80.0%
+      fontWeight: 'bold', 
+      lineHeight: 38,
+      marginLeft: 4 
+  }, 
+  unitText: { fontSize: 16, marginBottom: 6, color: '#999', fontWeight: 'normal' },
 
-  // SECCIÓN DERECHA
-  detailsColumn: { 
-    flex: 2, 
-    justifyContent: 'space-around',
-    borderLeftWidth: 1, 
-    borderLeftColor: '#e0e0e0',
-    paddingLeft: 16,
-    paddingVertical: 4
-  },
-  detailItem: { flexDirection: 'row', alignItems: 'center', marginBottom: 4 },
-  detailValue: { fontSize: 15, fontWeight: 'bold' },
-  detailLabel: { fontSize: 11, fontWeight: 'normal', color: Colors.textSecondary, marginLeft: 2 }
+  // Estilos para Hg
+  secondaryRow: { flexDirection: 'row', alignItems: 'center', marginTop: 4 },
+  secondaryLabel: { fontSize: 12, color: '#777' },
+  secondaryValue: { fontSize: 13, fontWeight: 'bold', color: '#555' },
+
+  techData: { flex: 0.8, paddingLeft: 12, justifyContent: 'center' },
+  techItem: { marginBottom: 8 },
+  techLabel: { fontSize: 10, color: '#aaa' },
+  techValue: { fontSize: 14, fontWeight: '600', color: '#333' },
+  warningContainer: { backgroundColor: '#fff3cd', padding: 4, borderRadius: 4, alignItems: 'center', marginTop: 4 },
+  warningText: { color: '#856404', fontSize: 10, fontWeight: 'bold' }
 });

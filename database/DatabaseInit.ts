@@ -1,7 +1,8 @@
 import * as SQLite from "expo-sqlite";
 
 // Abrir la base de datos de forma síncrona (nueva API de Expo SDK 50+)
-export const db = SQLite.openDatabaseSync("agrosense.db");
+// AL CAMBIAR EL NOMBRE A V3, FORZAMOS UNA DB NUEVA Y LIMPIA
+export const db = SQLite.openDatabaseSync("agrosense_V3.db");
 
 export const initDatabase = async () => {
   try {
@@ -10,18 +11,15 @@ export const initDatabase = async () => {
     await db.execAsync("PRAGMA foreign_keys = ON;");
 
     // ---------------------------------------------------------
-    // ZONA DE PELIGRO: Descomentar solo para REINICIAR la DB
+    // ZONA DE PELIGRO: Descomentar solo si necesitas borrar tablas manualmente en el futuro
     // ---------------------------------------------------------
+    // await db.execAsync('DROP TABLE IF EXISTS device_electrodes');
     // await db.execAsync('DROP TABLE IF EXISTS readings_b01');
     // await db.execAsync('DROP TABLE IF EXISTS readings_c01');
     // await db.execAsync('DROP TABLE IF EXISTS sensors');
     // ---------------------------------------------------------
 
     // 1. Tabla de SENSORES
-    // Estructura optimizada para "Offline-First"
-    // - config_json: Guardamos el objeto complejo como texto
-    // - is_synced: Bandera para saber qué subir a Supabase
-    // - updated_at: Para saber qué descargar de Supabase (resolución de conflictos)
     await db.execAsync(`
       CREATE TABLE IF NOT EXISTS sensors (
         id TEXT PRIMARY KEY NOT NULL,
@@ -86,19 +84,20 @@ export const initDatabase = async () => {
       CREATE INDEX IF NOT EXISTS idx_c01_synced ON readings_c01 (is_synced);
     `);
 
-    // En DatabaseInit.ts
+    // 4. Tabla de CALIBRACIÓN DE ELECTRODOS
+    // NOTA: Aquí 'id' es la Primary Key única (ej: SENSOR_E1), permitiendo múltiples electrodos por sensor.
     await db.execAsync(`
       CREATE TABLE IF NOT EXISTS device_electrodes (
-        id TEXT PRIMARY KEY NOT NULL,    -- Formato: sensorId_index (ej: B01-001_1)
+        id TEXT PRIMARY KEY NOT NULL,     -- Formato: sensorId_E1 (ej: B01-001_E1)
         sensor_id TEXT NOT NULL,
-        electrode_index INTEGER NOT NULL, -- 1, 2, 3... N
-        depth REAL,                      -- Profundidad de instalación
-        texture TEXT,                    -- Tipo de suelo (Franco, Arcilloso...)
-        density REAL,                    -- Densidad aparente (g/cm3)
+        electrode_index INTEGER NOT NULL, -- 1, 2, 3
+        depth REAL,                       -- Profundidad
+        texture TEXT,                     -- Tipo de suelo
+        density REAL,                     -- Densidad aparente
         
         -- Calibración
-        points_json TEXT,                -- Puntos PMP, CC, SAT (para edición)
-        equations_json TEXT,             -- Segmentos m, b (para cálculo rápido)
+        points_json TEXT,                 -- Puntos PMP, CC, SAT (para edición)
+        equations_json TEXT,              -- Segmentos m, b (para cálculo rápido)
         
         -- Sincronización
         is_synced INTEGER DEFAULT 0,
@@ -106,13 +105,9 @@ export const initDatabase = async () => {
         
         FOREIGN KEY (sensor_id) REFERENCES sensors (id) ON DELETE CASCADE
       );
-      
-      -- Índice único para evitar duplicados del mismo electrodo en el mismo sensor
-      CREATE UNIQUE INDEX IF NOT EXISTS idx_sensor_elec_unique 
-      ON device_electrodes (sensor_id, electrode_index);
     `);
 
-    console.log("[DB] Inicialización completada. Sistema listo.");
+    console.log("[DB] Inicialización completada. Sistema listo (V3).");
   } catch (error) {
     console.error("[DB] ❌ Error fatal iniciando BD:", error);
   }

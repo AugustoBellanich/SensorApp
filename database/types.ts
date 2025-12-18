@@ -14,11 +14,10 @@ export interface SensorEntity extends SyncableEntity {
   activity?: string;
   lat?: number;
   lng?: number;
-  config_json: string; // Úsalo solo para Config de Hardware (ej: intervalos)
+  config_json: string; 
   last_sync?: string;
 }
 
-// Mantenlo para las pantallas de Gráficos e Historial
 export interface ReadingB01 extends SyncableEntity {
   id?: number;
   sensor_id: string;
@@ -30,7 +29,8 @@ export interface ReadingB01 extends SyncableEntity {
   battery_mv: number;
 }
 
-// Mantenlo para el Dashboard y Cálculos matemáticos
+// --- Tipos de Calibración ---
+
 export interface CalibrationPoint {
   id: string;
   type: 'PMP' | 'CC' | 'SAT' | 'EXTRA';
@@ -49,7 +49,17 @@ export interface LinearSegment {
   maxMv: number;
 }
 
-// Esta es tu NUEVA ENTIDAD MAESTRA para calibraciones
+// --- AGREGAR ESTA INTERFAZ QUE FALTABA ---
+// Esta define la estructura del objeto dentro de config_json -> calibration -> electrodes[]
+export interface ElectrodeCalibration {
+    depth: number;
+    texture: string;
+    density: number;
+    points: CalibrationPoint[];
+    equations: LinearSegment[];
+}
+
+// Esta es tu entidad para la tabla SQL (si decides migrar a tabla relacional luego)
 export interface ElectrodeEntity extends SyncableEntity {
   id: string; 
   sensor_id: string;
@@ -57,6 +67,6 @@ export interface ElectrodeEntity extends SyncableEntity {
   depth: number;
   texture: string;
   density: number;
-  points_json: string;    // Aquí guardas el array de CalibrationPoint[]
-  equations_json: string; // Aquí guardas el array de LinearSegment[]
+  points_json: string;    
+  equations_json: string; 
 }
