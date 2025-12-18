@@ -1,13 +1,13 @@
-import * as SQLite from 'expo-sqlite';
+import * as SQLite from "expo-sqlite";
 
 // Abrir la base de datos de forma síncrona (nueva API de Expo SDK 50+)
-export const db = SQLite.openDatabaseSync('agrosense.db');
+export const db = SQLite.openDatabaseSync("agrosense.db");
 
 export const initDatabase = async () => {
   try {
     // 0. Configuración de integridad
     // SQLite requiere activar manualmente las Foreign Keys en cada conexión
-    await db.execAsync('PRAGMA foreign_keys = ON;');
+    await db.execAsync("PRAGMA foreign_keys = ON;");
 
     // ---------------------------------------------------------
     // ZONA DE PELIGRO: Descomentar solo para REINICIAR la DB
@@ -84,6 +84,32 @@ export const initDatabase = async () => {
       );
       
       CREATE INDEX IF NOT EXISTS idx_c01_synced ON readings_c01 (is_synced);
+    `);
+
+    // En DatabaseInit.ts
+    await db.execAsync(`
+      CREATE TABLE IF NOT EXISTS device_electrodes (
+        id TEXT PRIMARY KEY NOT NULL,    -- Formato: sensorId_index (ej: B01-001_1)
+        sensor_id TEXT NOT NULL,
+        electrode_index INTEGER NOT NULL, -- 1, 2, 3... N
+        depth REAL,                      -- Profundidad de instalación
+        texture TEXT,                    -- Tipo de suelo (Franco, Arcilloso...)
+        density REAL,                    -- Densidad aparente (g/cm3)
+        
+        -- Calibración
+        points_json TEXT,                -- Puntos PMP, CC, SAT (para edición)
+        equations_json TEXT,             -- Segmentos m, b (para cálculo rápido)
+        
+        -- Sincronización
+        is_synced INTEGER DEFAULT 0,
+        updated_at TEXT,
+        
+        FOREIGN KEY (sensor_id) REFERENCES sensors (id) ON DELETE CASCADE
+      );
+      
+      -- Índice único para evitar duplicados del mismo electrodo en el mismo sensor
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_sensor_elec_unique 
+      ON device_electrodes (sensor_id, electrode_index);
     `);
 
     console.log("[DB] Inicialización completada. Sistema listo.");

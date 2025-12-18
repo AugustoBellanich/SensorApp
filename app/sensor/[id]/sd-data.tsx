@@ -9,7 +9,8 @@ import StatPanel from '../../../components/sensor/StatPanel';
 import { Colors } from '../../../constants/Colors';
 
 type TimeRange = '12h' | '1D' | '7D' | '1M' | '1A';
-type UnitType = '% θ' | '% ω' | 'mV';
+type UnitType = '% Hv' | '% Hg' | 'mV';
+
 
 export default function SDDataScreen() {
   const { id } = useLocalSearchParams();
@@ -17,7 +18,7 @@ export default function SDDataScreen() {
   const router = useRouter();
   
   const [range, setRange] = useState<TimeRange>('12h');
-  const [unit, setUnit] = useState<UnitType>('% θ');
+  const [unit, setUnit] = useState<UnitType>('% Hv');
   const [isLoading, setIsLoading] = useState(false);
   
   const [tempData, setTempData] = useState<any[]>([]);
@@ -56,7 +57,7 @@ export default function SDDataScreen() {
     const e1 = generateDataForRange(range, 25, unit);
     const e2 = generateDataForRange(range, 18, unit);
     const e3 = generateDataForRange(range, 10, unit);
-    setTempData(generateDataForRange(range, 22, '% θ'));
+    setTempData(generateDataForRange(range, 22, '% Hv'));
     setElectrodesData({
       1: { data: e1, stats: calculateStats(e1) },
       2: { data: e2, stats: calculateStats(e2) },
@@ -97,9 +98,9 @@ export default function SDDataScreen() {
 
         <View style={{ paddingHorizontal: 16 }}>
            <SegmentedControl 
-             options={['% θ (Vol)', '% ω (Grav)', 'mV']} 
-             selectedIndex={unit === '% θ' ? 0 : unit === '% ω' ? 1 : 2} 
-             onChange={(i) => setUnit(i === 0 ? '% θ' : i === 1 ? '% ω' : 'mV')} 
+             options={['% Hv (Vol)', '% Hg (Grav)', 'mV']} 
+             selectedIndex={unit === '% Hv' ? 0 : unit === '% Hg' ? 1 : 2} 
+             onChange={(i) => setUnit(i === 0 ? '% Hv' : i === 1 ? '% Hg' : 'mV')} 
            />
         </View>
 
@@ -115,7 +116,7 @@ export default function SDDataScreen() {
             {[1, 2, 3].map((num) => {
               const elec = electrodesData[num];
               // @ts-ignore
-              const refs = (unit === '% θ') ? (calibrationRefs[num] || []) : [];
+              const refs = (unit === '% Hv') ? (calibrationRefs[num] || []) : [];
               return (
                 <View key={num} style={{ marginTop: 25 }}>
                   <Text style={styles.sectionTitle}>Electrodo {num}</Text>

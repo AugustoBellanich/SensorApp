@@ -7,9 +7,12 @@ import { GlobalStyles } from '../../constants/GlobalStyles';
 interface Props {
   type: 'temp' | 'hum';
   value: number| null;
+  label?: string;
 }
 
-export default function ClimateCard({ type, value }: Props) {
+export default function ClimateCard({ type, value, label }: Props) {
+  
+  const displayLabel = label || (type === 'temp' ? 'Temperatura' : 'Humedad');
   
   const config = type === 'temp' ? {
     title: 'TEMPERATURA',

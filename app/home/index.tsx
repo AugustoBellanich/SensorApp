@@ -22,7 +22,6 @@ import {
   saveSensor,
 } from "../../database/SensorRepository";
 import { SensorEntity } from "../../database/types";
-import { supabase } from "../../lib/supabase";
 import { syncService } from "../../services/syncService";
 
 // --- VARIABLE DE CONTROL DE SESIÓN ---
@@ -218,107 +217,64 @@ export default function HomeScreen() {
         setOnboardingStatus("Conectando BLE...");
         await connectToDevice(item.device);
 
-        // --- PUNTO CRÍTICO ---
-        // Usamos el nombre del sensor (ej: SEN-N01-25104E) si existe,
-        // sino la MAC. Queremos el ID limpio (N01-25104E).
         const rawId = item.device.name || item.id;
         const cleanId = rawId.replace("SEN-", "");
 
-        console.log(`[DEBUG] ID Detectado: ${rawId} -> ID Limpio: ${cleanId}`);
-
         setOnboardingStatus("Verificando registro...");
+        // Buscamos en nuestra tabla estructurada
         const existingLocal = await getSensorById(cleanId);
 
         if (!existingLocal) {
-          setOnboardingStatus("Consultando Nube...");
-          try {
-            const { data: cloudDevice, error } = await supabase
-              .from("devices")
-              .select("*")
-              .eq("id", cleanId)
-              .single();
+          setOnboardingStatus("Registrando sensor...");
+          // Si no existe, lo creamos con valores BASE.
+          // Las profundidades y calibraciones vendrán de la tabla 'device_electrodes'
+          const now = new Date().toISOString();
+          await saveSensor(
+            {
+              id: cleanId,
+              alias: item.name,
+              type: item.type === "UNKNOWN" ? "B01" : item.type,
+              location: "Sin asignar",
+              activity: "Nuevo",
+              config_json: "{}",
+              is_synced: 0,
+              updated_at: now,
+            },
+            false
+          );
 
-            if (cloudDevice && !error) {
-              console.log("[DEBUG] Sensor encontrado en Supabase.");
-              await saveSensor(
-                {
-                  id: cloudDevice.id,
-                  alias: cloudDevice.alias,
-                  type: cloudDevice.type,
-                  location: cloudDevice.name_farm,
-                  activity: cloudDevice.activity,
-                  lat: cloudDevice.lat,
-                  lng: cloudDevice.lng,
-                  config_json: JSON.stringify(cloudDevice.config),
-                  is_synced: 1,
-                  updated_at: cloudDevice.created_at,
-                  last_sync: new Date().toISOString(),
-                },
-                true
-              );
-            } else {
-              console.log(
-                "[DEBUG] No está en nube o error RLS. Creando local..."
-              );
-              throw new Error("NOT_IN_CLOUD");
-            }
-          } catch (e) {
-            // Si no está en la nube, lo creamos local igual para no trabar al usuario
-            const now = new Date().toISOString();
-            await saveSensor(
-              {
-                id: cleanId,
-                alias: item.name,
-                type: item.type === "UNKNOWN" ? "N01" : item.type,
-                location: "Sin asignar",
-                activity: "Activo",
-                config_json: "{}",
-                is_synced: 0,
-                updated_at: now,
-                last_sync: now,
-              },
-              false
-            );
-          }
           await loadSensorsFromDB();
         }
 
-        // --- NAVEGACIÓN ---
         setOnboardingStatus(null);
-        console.log(`[DEBUG] Navegando a dashboard de ${cleanId}`);
 
-        // Usar setTimeout para dar tiempo a que los estados de BLE se asienten
+        // Navegación con delay para asegurar que el contexto BLE guardó el device
         setTimeout(() => {
-          if (item.type === "N01") {
-            router.push(`/gateway/${cleanId}/dashboard`);
-          } else {
-            router.push(`/sensor/${cleanId}/dashboard`);
-          }
-        }, 100);
+          const route = item.type === "N01" ? "gateway" : "sensor";
+          router.push(`/${route}/${cleanId}/dashboard`);
+        }, 200);
       } catch (error: any) {
         setOnboardingStatus(null);
         console.error("[DEBUG] Error en handleConnectAction:", error);
 
-        // IMPORTANTE: Solo desconectamos si el error es realmente de BLE.
-        // Si el error fue de navegación o de base de datos, quizás no queremos desconectar.
-        if (
-          error.message.includes("BLE") ||
-          error.message.includes("TIMEOUT")
-        ) {
-          await disconnectDevice();
+        // Si fue un timeout o error de conexión, el BleContext ya limpió todo.
+        // Solo avisamos al usuario.
+        if (error.message === "JS_TIMEOUT_CRITICAL") {
           Alert.alert(
-            "Error",
-            "No se pudo establecer comunicación con el sensor."
+            "Tiempo agotado",
+            "El sensor tardó demasiado en responder. Asegúrate de que no esté en modo sleep."
+          );
+        } else {
+          Alert.alert(
+            "Error de Conexión",
+            "No se pudo vincular con el sensor."
           );
         }
       }
     } else if (item.isSaved) {
-      // --- ESCENARIO B: EL SENSOR NO ESTÁ CERCA PERO ESTÁ EN EL HISTORIAL ---
-      if (item.type === "N01") {
-        router.push(`/gateway/${item.id}/dashboard`);
-      } else {
-        router.push(`/sensor/${item.id}/dashboard`);
-      }
+      // Navegación Offline (sin conexión BLE)
+      const route = item.type === "N01" ? "gateway" : "sensor";
+      router.push(`/${route}/${item.id}/dashboard`);
     }
   };
 

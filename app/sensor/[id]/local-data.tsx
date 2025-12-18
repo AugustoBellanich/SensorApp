@@ -206,7 +206,7 @@ export default function LocalDataScreen() {
                     <SensorChart 
                       data={data[`e${num}`]} 
                       type="line" 
-                      unit={unit===0?'% θ':unit===1?'% ω':'mV'} 
+                      unit={unit===0?'% Hv':unit===1?'% Hg':'mV'} 
                       color={Colors.primary} 
                     />
                   </View>

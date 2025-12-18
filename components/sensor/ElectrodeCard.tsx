@@ -13,6 +13,7 @@ interface Props {
   isCalibrated: boolean;
   disabled?: boolean;
   onCalibratePress: () => void;
+  texture?: string;
   
 }
 
@@ -23,7 +24,8 @@ export default function ElectrodeCard({
   gravimetricMoisture,
   voltageMv,
   isCalibrated,
-  onCalibratePress
+  onCalibratePress,
+  texture
 }: Props) {
   
   const displayHv = isCalibrated ? volumetricMoisture.toFixed(1) : '--.-';
@@ -51,7 +53,7 @@ export default function ElectrodeCard({
             
             {/* Unidad al pie del número (bottom) */}
             <View style={{ marginBottom: 12 }}>
-               <Text style={styles.unitSymbol}>%θ</Text>
+               <Text style={styles.unitSymbol}>%Hv</Text>
             </View>
           </View>
           

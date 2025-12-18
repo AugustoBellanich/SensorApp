@@ -1,28 +1,26 @@
-// database/types.ts (VERSIÓN FINAL Y LIMPIA)
+// types.ts
 
-// --- INTERFAZ BASE PARA SINCRONIZACIÓN ---
 export interface SyncableEntity {
-  is_synced: number;    // 0 = Pendiente de subir, 1 = Sincronizado
-  updated_at: string;   // ISO Date para resolver conflictos
-  deleted_at?: string | null; // Soft Delete
+  is_synced: number;
+  updated_at: string;
+  deleted_at?: string | null;
 }
-
-// --- ENTIDADES PRINCIPALES ---
 
 export interface SensorEntity extends SyncableEntity {
-  id: string;          
+  id: string;
   alias: string;
   type: 'B01' | 'C01' | 'N01';
-  location: string;    
-  activity?: string;   
-  lat?: number;        
-  lng?: number;        
-  config_json: string; 
-  last_sync?: string;  
+  location: string;
+  activity?: string;
+  lat?: number;
+  lng?: number;
+  config_json: string; // Úsalo solo para Config de Hardware (ej: intervalos)
+  last_sync?: string;
 }
 
+// Mantenlo para las pantallas de Gráficos e Historial
 export interface ReadingB01 extends SyncableEntity {
-  id?: number;          
+  id?: number;
   sensor_id: string;
   timestamp: string;
   soil_temp: number;
@@ -32,46 +30,33 @@ export interface ReadingB01 extends SyncableEntity {
   battery_mv: number;
 }
 
-export interface ReadingC01 extends SyncableEntity {
-  id?: number;
-  sensor_id: string;
-  timestamp: string;
-  air_temp: number;
-  humidity: number;
-  battery_mv: number;
-}
-
-// --- TIPOS DE CALIBRACIÓN (NUMÉRICOS - PARA DB Y LÓGICA) ---
-
-export interface CalibrationPoint { // Renombrado a CalibrationPoint (ahora es numérico)
+// Mantenlo para el Dashboard y Cálculos matemáticos
+export interface CalibrationPoint {
   id: string;
   type: 'PMP' | 'CC' | 'SAT' | 'EXTRA';
-  labelShort: string; 
-  description: string; 
-  hv: number;     // Humedad Volumétrica (NUMBER)
-  hg: number;     // Humedad Gravimétrica (NUMBER)
-  mv: number;     // Voltaje Crudo (NUMBER)
-  isFixed: boolean; 
+  labelShort: string;
+  description: string;
+  hv: number;
+  hg: number;
+  mv: number;
+  isFixed: boolean;
 }
 
 export interface LinearSegment {
-    m: number; 
-    b: number; 
-    minMv: number;
-    maxMv: number;
+  m: number;
+  b: number;
+  minMv: number;
+  maxMv: number;
 }
 
-export interface ElectrodeCalibration {
-    depth: number;
-    texture: string;
-    density: number;
-    points: CalibrationPoint[]; // Usa el tipo numérico estandarizado
-    equations: LinearSegment[]; 
-}
-
-export interface SensorConfigB01 {
-    calibration?: {
-        electrodes: ElectrodeCalibration[];
-    };
-    // ... otros campos de config hardware
+// Esta es tu NUEVA ENTIDAD MAESTRA para calibraciones
+export interface ElectrodeEntity extends SyncableEntity {
+  id: string; 
+  sensor_id: string;
+  electrode_index: number;
+  depth: number;
+  texture: string;
+  density: number;
+  points_json: string;    // Aquí guardas el array de CalibrationPoint[]
+  equations_json: string; // Aquí guardas el array de LinearSegment[]
 }

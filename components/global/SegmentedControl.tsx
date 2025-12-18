@@ -6,25 +6,25 @@ interface Props {
   options: string[];
   selectedIndex: number;
   onChange: (index: number) => void;
+  disabled?: boolean;
 }
 
-export default function SegmentedControl({ options, selectedIndex, onChange }: Props) {
+export default function SegmentedControl({ options, selectedIndex, onChange, disabled }: Props) {
   return (
-    <View style={styles.container}>
-      {options.map((option, index) => {
-        const isActive = index === selectedIndex;
-        return (
-          <TouchableOpacity
-            key={index}
-            style={[styles.option, isActive && styles.activeOption]}
-            onPress={() => onChange(index)}
-          >
-            <Text style={[styles.text, isActive && styles.activeText]}>
-              {option}
-            </Text>
-          </TouchableOpacity>
-        );
-      })}
+    <View style={[styles.container, disabled && { opacity: 0.5 }]}> 
+      {options.map((option, index) => (
+        <TouchableOpacity
+          key={index}
+          // Aquí usas 'segment' y 'activeSegment', que ahora sí existen abajo
+          style={[styles.segment, index === selectedIndex && styles.activeSegment]}
+          onPress={() => onChange(index)}
+          disabled={disabled}
+        >
+          <Text style={[styles.text, index === selectedIndex && styles.activeText]}>
+            {option}
+          </Text>
+        </TouchableOpacity>
+      ))}
     </View>
   );
 }
@@ -37,13 +37,15 @@ const styles = StyleSheet.create({
     padding: 4,
     marginBottom: 20,
   },
-  option: {
+  // CORRECCIÓN: Renombrado de 'option' a 'segment'
+  segment: {
     flex: 1,
     paddingVertical: 8,
     alignItems: 'center',
     borderRadius: 6,
   },
-  activeOption: {
+  // CORRECCIÓN: Renombrado de 'activeOption' a 'activeSegment'
+  activeSegment: {
     backgroundColor: '#fff',
     elevation: 2,
     shadowColor: '#000', shadowOpacity: 0.1, shadowRadius: 2,
