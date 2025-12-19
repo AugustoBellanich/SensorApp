@@ -394,11 +394,6 @@ export const BleProvider = ({ children }: { children: React.ReactNode }) => {
         if (error) return;
         if (!characteristic?.value) return;
 
-        if (updateKey === 'battery') {
-            const val = decodeBinaryByte(characteristic.value);
-            console.log(`[BAT-NOTIFY] Nuevo valor: ${val}%`);
-        }
-
         if (isStatus && category === "GATEWAY") {
            const valStr = base64ToUtf8(characteristic.value);
            if (char === BLE_UUIDS.STATUS.WIFI_STATUS) setDiagnosisStatus(p => ({...p, wifiStatus: valStr}));

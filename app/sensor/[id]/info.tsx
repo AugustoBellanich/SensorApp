@@ -112,6 +112,11 @@ export default function SensorInfoScreen() {
 
     // 2. LEER CONFIG (Sin cambios)
     useEffect(() => {
+        if (sensorId.includes("N01")) {
+            console.log("🛑 Es un Gateway N01. Se omite lectura de configuración de Sensor.");
+            setLoading(false);
+            return; // <--- ESTO EVITA EL CRASH
+        }
         const readSensorConfig = async () => {
             if (activeTab === 1 && isConnected && connectedDevice && !isWritingConfig) {
                 console.log("Leyendo configuración actual del sensor...");

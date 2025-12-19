@@ -52,7 +52,7 @@ export const BLE_UUIDS = {
   // === ALMACENAMIENTO (SD/SPIFFS) ===
   STORAGE: {
     FILE_LIST:    '6deedd77-f7e4-412e-9514-baee44a2d202',
-    FILE_DELETE:  '6deedd77-f7e4-412e-9514-baee44a2d203', // Sirve para "Borrar Todo" en N01
+    FILE_DELETE:  '6deedd77-f7e4-412e-9514-baee44a2d203', 
     FILE_CONTENT: '6deedd77-f7e4-412e-9514-baee44a2d204',
   },
 

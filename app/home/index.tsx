@@ -164,29 +164,58 @@ export default function HomeScreen() {
     }, [connectedDevice, isBusy])
   );
 
-  // --- 3. MERGE: BLE + DB ---
+  // --- 3. MERGE: BLE + DB (MEJORADO) ---
+  // Este bloque reemplaza al anterior useEffect número 3
   useEffect(() => {
     const combined: SensorItem[] = scannedDevices.map((device) => {
-      const uniqueId = device.name || device.id;
-      const cleanId = uniqueId.replace("SEN-", "");
+      // 1. Obtener nombre crudo (lo que viene del aire)
+      const rawName = device.name || device.id;
+
+      // 2. Limpiar prefijo "SEN-" (sin importar mayúsculas/minúsculas)
+      // Ejemplo: "SEN-N01-AB123" se convierte en "N01-AB123"
+      const cleanId = rawName.replace(/^SEN-/i, "").trim();
+
+      // 3. Buscar si ya lo tenemos guardado en la BD
       const known = savedSensors.find(
-        (db) => db.id === cleanId || db.id === uniqueId
+        (db) => db.id === cleanId || db.id === rawName
       );
 
+      // 4. DETECTAR TIPO AL VUELO (Para que el icono salga bien en la lista)
+      let detectedType: SensorModelType = "UNKNOWN";
+
+      if (known) {
+        // Si ya está guardado, confiamos en la base de datos
+        detectedType = known.type as SensorModelType;
+      } else {
+        // Si es nuevo, adivinamos por el nombre limpio
+        const upperId = cleanId.toUpperCase();
+        if (upperId.includes("N01") || upperId.includes("N02"))
+          detectedType = "N01";
+        else if (upperId.includes("C01")) detectedType = "C01";
+        else if (upperId.includes("B01") || upperId.includes("A01"))
+          detectedType = "B01";
+      }
+
       return {
-        id: uniqueId,
-        name: known?.alias || device.name || "Sensor Nuevo",
+        id: rawName, // Importante: Mantenemos el ID original para poder conectarnos
+
+        // VISUAL: Si tiene Alias personal úsalo, si no, muestra el ID LIMPIO (sin SEN-)
+        name: known?.alias || cleanId,
+
         rssi: device.rssi,
         isSaved: !!known,
-        type: (known?.type as SensorModelType) || getSensorType(uniqueId),
+        type: detectedType, // Usamos el tipo corregido para que salga el icono verde/azul/etc
         device: device,
       };
     });
 
+    // 5. Agregar los sensores guardados que NO están cerca (Historial Offline)
     savedSensors.forEach((savedSensor) => {
-      const isAlreadyListed = combined.find(
-        (c) => c.id.replace("SEN-", "") === savedSensor.id
-      );
+      // Verificamos si ya está en la lista combinada (comparando ID limpio)
+      const isAlreadyListed = combined.find((c) => {
+        const cClean = (c.device?.name || c.id).replace(/^SEN-/i, "").trim();
+        return cClean === savedSensor.id;
+      });
 
       if (!isAlreadyListed) {
         combined.push({
@@ -199,6 +228,7 @@ export default function HomeScreen() {
       }
     });
 
+    // 6. Ordenar: Primero los que tienen más señal, al final los offline
     combined.sort((a, b) => {
       const rssiA = a.rssi ?? -999;
       const rssiB = b.rssi ?? -999;
@@ -220,6 +250,13 @@ export default function HomeScreen() {
         const rawId = item.device.name || item.id;
         const cleanId = rawId.replace("SEN-", "");
 
+        let finalType = item.type;
+        if (finalType === "UNKNOWN") {
+          if (cleanId.includes("N01")) finalType = "N01";
+          else if (cleanId.includes("C01")) finalType = "C01";
+          else finalType = "B01"; // Solo por defecto si no tiene nada en el nombre
+        }
+
         setOnboardingStatus("Verificando registro...");
         // Buscamos en nuestra tabla estructurada
         const existingLocal = await getSensorById(cleanId);
@@ -229,11 +266,12 @@ export default function HomeScreen() {
           // Si no existe, lo creamos con valores BASE.
           // Las profundidades y calibraciones vendrán de la tabla 'device_electrodes'
           const now = new Date().toISOString();
+
           await saveSensor(
             {
               id: cleanId,
               alias: item.name,
-              type: item.type === "UNKNOWN" ? "B01" : item.type,
+              type: finalType,
               location: "Sin asignar",
               activity: "Nuevo",
               config_json: "{}",

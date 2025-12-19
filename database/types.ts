@@ -29,6 +29,15 @@ export interface ReadingB01 extends SyncableEntity {
   battery_mv: number;
 }
 
+export interface ReadingC01 extends SyncableEntity {
+  id?: number;
+  sensor_id: string;
+  timestamp: string;
+  air_temp: number;
+  humidity: number;
+  battery_mv: number;
+}
+
 // --- Tipos de Calibración ---
 
 export interface CalibrationPoint {

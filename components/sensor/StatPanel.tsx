@@ -18,7 +18,7 @@ export default function StatPanel({ stats, unit }: Props) {
       </View>
       
       <View style={[styles.statItem, styles.statBorder]}>
-        <Text style={styles.statLabel}>PROMEDIO</Text>
+        <Text style={styles.statLabel}>MEDIANA</Text>
         <Text style={styles.statValue}>
           {stats.avg.toFixed(1)} <Text style={styles.unitText}>{unit}</Text>
         </Text>
