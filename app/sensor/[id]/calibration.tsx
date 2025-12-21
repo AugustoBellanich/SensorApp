@@ -114,7 +114,7 @@ export default function CalibrationScreen() {
                         let parsedPoints: CalibrationPoint[] = [];
                         try {
                             parsedPoints = JSON.parse(dbElec.points_json || '[]');
-                        } catch (e) { parsedPoints = []; }
+                        } catch { parsedPoints = []; }
 
                         tempElectrodes[idx] = {
                             depth: dbElec.depth?.toString() ?? '',

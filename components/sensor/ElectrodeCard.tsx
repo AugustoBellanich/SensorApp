@@ -13,6 +13,7 @@ interface ElectrodeCardProps {
   texture: string;
   onCalibratePress: () => void;
   disabled?: boolean;
+  isNoData?: boolean; // <--- NUEVA PROPIEDAD
 }
 
 export default function ElectrodeCard({
@@ -24,11 +25,13 @@ export default function ElectrodeCard({
   isCalibrated,
   texture,
   onCalibratePress,
-  disabled
+  disabled,
+  isNoData = false, // <--- Valor por defecto
 }: ElectrodeCardProps) {
   
   // Colores dinámicos según humedad
   const getMoistureColor = (val: number) => {
+    if (isNoData) return '#ccc'; // Color gris si no hay datos
     if (!isCalibrated) return '#999';
     if (val < 10) return '#e21e08ff'; // Seco
     if (val < 30) return '#eede04ff'; // Medio
@@ -63,15 +66,16 @@ export default function ElectrodeCard({
           <View style={styles.valueContainer}>
             <MaterialCommunityIcons 
               name="water-percent" 
-              size={32} // Icono un poco más chico
+              size={32} 
               color={getMoistureColor(volumetricMoisture)} 
             />
             <Text style={[
               styles.valueText, 
-              { color: Colors.textPrimary, fontWeight: 'bold' }
+              { color: isNoData ? '#ccc' : Colors.textPrimary, fontWeight: 'bold' }
             ]}>
-              {isCalibrated ? volumetricMoisture.toFixed(1) : "--"}
-              <Text style={styles.unitText}>%</Text>
+              {/* LÓGICA DE DISPLAY: Si no hay datos -> "--", si no calibrado -> "RAW", si ok -> valor */}
+              {isNoData ? "--" : (isCalibrated ? volumetricMoisture.toFixed(1) : "--")}
+              {!isNoData && <Text style={styles.unitText}>%</Text>}
             </Text>
           </View>
           
@@ -79,7 +83,7 @@ export default function ElectrodeCard({
           <View style={styles.secondaryRow}>
              <Text style={styles.secondaryLabel}>Gravimétrica (Hg): </Text>
              <Text style={styles.secondaryValue}>
-                {isCalibrated ? gravimetricMoisture.toFixed(1) : "--"} %
+                {isNoData ? "--" : (isCalibrated ? gravimetricMoisture.toFixed(1) : "--")} %
              </Text>
           </View>
         </View>
@@ -88,13 +92,15 @@ export default function ElectrodeCard({
         <View style={styles.techData}>
           <View style={styles.techItem}>
             <Text style={styles.techLabel}>Voltaje</Text>
-            <Text style={styles.techValue}>{voltageMv.toFixed(0)} mV</Text>
+            <Text style={styles.techValue}>
+                {isNoData ? "--" : voltageMv.toFixed(0)} mV
+            </Text>
           </View>
           <View style={styles.techItem}>
             <Text style={styles.techLabel}>Suelo</Text>
             <Text style={styles.techValue} numberOfLines={1}>{texture}</Text>
           </View>
-          {!isCalibrated && (
+          {!isCalibrated && !isNoData && (
             <View style={styles.warningContainer}>
               <Text style={styles.warningText}>Sin Calibrar</Text>
             </View>
@@ -140,18 +146,16 @@ const styles = StyleSheet.create({
   
   mainData: { flex: 1.2, paddingRight: 10, borderRightWidth: 1, borderRightColor: '#f0f0f0' },
   label: { fontSize: 11, color: '#999', textTransform: 'uppercase', marginBottom: 4 },
-  valueContainer: { flexDirection: 'row', alignItems: 'flex-end', marginBottom: 8 }, // Flex-end alinea el % abajo
+  valueContainer: { flexDirection: 'row', alignItems: 'flex-end', marginBottom: 8 }, 
   
-  // CAMBIO DE TAMAÑO DE FUENTE AQUÍ
   valueText: { 
-      fontSize: 34, // Antes era más grande, reducido para que quepan 80.0%
+      fontSize: 34, 
       fontWeight: 'bold', 
       lineHeight: 38,
       marginLeft: 4 
   }, 
   unitText: { fontSize: 16, marginBottom: 6, color: '#999', fontWeight: 'normal' },
 
-  // Estilos para Hg
   secondaryRow: { flexDirection: 'row', alignItems: 'center', marginTop: 4 },
   secondaryLabel: { fontSize: 12, color: '#777' },
   secondaryValue: { fontSize: 13, fontWeight: 'bold', color: '#555' },

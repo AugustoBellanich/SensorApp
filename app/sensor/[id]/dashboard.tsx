@@ -1,6 +1,6 @@
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { Stack, useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useState } from "react";
 import {
   ActivityIndicator,
   ScrollView,
@@ -15,36 +15,38 @@ import { SensorData, useBle } from "../../../context/BleContext";
 
 // --- COMPONENTES ---
 import ClimateCard from "../../../components/sensor/ClimateCard";
-// Asegúrate de importar el componente actualizado abajo
 import ElectrodeCard from "../../../components/sensor/ElectrodeCard";
 import SensorInfoBar from "../../../components/sensor/SensorInfoBar";
 
 // --- LOGICA Y DB ---
 import { getElectrodesBySensor } from "../../../database/ElectrodeRepository";
+import { getLastReadingB01, getLastReadingC01 } from "../../../database/ReadingsRepository";
 import { getSensorById } from "../../../database/SensorRepository";
+
 import {
   ElectrodeEntity,
   LinearSegment,
   SensorEntity,
 } from "../../../database/types";
 import { getBatteryColor, getBatteryIcon } from "../../../utils/batteryUtils";
-
-// IMPORTAMOS LA LÓGICA MATEMÁTICA CENTRAL
-import { calculateMoistureFromSegments } from "../../../utils/calibration";
+import { calculateMoistureFromSegments } from "../../../utils/calibration"; // Asegúrate que la importación sea correcta
 
 export default function SensorDashboard() {
   const { id } = useLocalSearchParams();
   const router = useRouter();
   const sensorIdStr = Array.isArray(id) ? id[0] : id;
 
-  const { connectedDevice, sensorData, diagnosisStatus, disconnectDevice } = useBle();
+  const { connectedDevice, sensorData, diagnosisStatus } = useBle();
   const isConnected = !!connectedDevice;
 
   const [dbSensor, setDbSensor] = useState<SensorEntity | null>(null);
   const [dbElectrodes, setDbElectrodes] = useState<ElectrodeEntity[]>([]);
+  
+  // Estado para el último dato guardado (Offline)
+  const [lastReading, setLastReading] = useState<any>(null);
   const [loading, setLoading] = useState(true);
 
-  // 1. CARGAR TODO DESDE LA DB
+  // 1. CARGA DE DATOS
   useFocusEffect(
     useCallback(() => {
       let isActive = true;
@@ -55,14 +57,35 @@ export default function SensorDashboard() {
         try {
           const sensor = await getSensorById(sensorIdStr);
           const electrodes = await getElectrodesBySensor(sensorIdStr);
+          
+          // Determinar tipo (fallback al ID si sensor es null)
+          const typeToCheck = sensor?.type || (sensorIdStr.includes("B01") ? "B01" : "C01");
+          
+          console.log(`[DASHBOARD] Buscando datos locales para ${sensorIdStr} (Tipo: ${typeToCheck})`);
+
+          let lastData = null;
+          if (typeToCheck === 'B01') {
+             lastData = await getLastReadingB01(sensorIdStr);
+          } else {
+             lastData = await getLastReadingC01(sensorIdStr);
+          }
 
           if (isActive) {
             setDbSensor(sensor);
             setDbElectrodes(electrodes);
+            setLastReading(lastData);
+            
+            if (lastData) {
+                console.log(`[DASHBOARD] ✅ Dato encontrado: ${lastData.timestamp}`);
+            } else {
+                console.log(`[DASHBOARD] ⚠️ SQLite vacío para este sensor.`);
+            }
+            
             setLoading(false);
           }
-        } catch (e) {
-          console.error("Error cargando dashboard", e);
+        } catch (error) {
+          console.error("Error cargando dashboard", error);
+          if (isActive) setLoading(false);
         }
       };
 
@@ -72,28 +95,41 @@ export default function SensorDashboard() {
     }, [sensorIdStr])
   );
 
-  useEffect(() => {
-    return () => {
-      // disconnectDevice(); 
-    };
-  }, [disconnectDevice]);
-
   const modelType = dbSensor?.type || (sensorIdStr.includes("B01") ? "B01" : "C01");
   const isClimate = modelType === "C01";
-  const batteryPercent = isConnected ? sensorData.battery ?? 0 : 0;
 
-  // --- HELPER DE CÁLCULO (CORREGIDO: 2 Argumentos) ---
-  const getMoisture = (rawMv: number, electrode?: ElectrodeEntity) => {
+  // --- HELPER BATERÍA ---
+  const getDisplayBattery = () => {
+      if (isConnected) return sensorData.battery ?? 0;
+      if (lastReading?.battery_mv) {
+          const v = lastReading.battery_mv / 1000;
+          return Math.max(0, Math.min(100, (v - 3.3) / (4.2 - 3.3) * 100));
+      }
+      return null;
+  };
+  
+  const batteryPercent = getDisplayBattery();
+
+  // --- HELPER HUMEDAD ---
+  const getMoisture = (rawMv: number | null, electrode?: ElectrodeEntity) => {
+      if (rawMv === null || rawMv === 0) return null;
+      
       if (!electrode || !electrode.equations_json || electrode.equations_json === '[]') {
           return 0;
       }
       try {
           const segments: LinearSegment[] = JSON.parse(electrode.equations_json);
           return calculateMoistureFromSegments(rawMv, segments);
-      } catch (e) {
-          console.error("Error calculando humedad:", e);
+      } catch {
+          // ESLint Fix: Quitamos la variable 'e' si no la usamos
           return 0;
       }
+  };
+
+  const formatOfflineDate = (isoString: string) => {
+      if (!isoString) return "";
+      const d = new Date(isoString);
+      return `${d.toLocaleDateString()} ${d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}`;
   };
 
   if (loading)
@@ -116,9 +152,13 @@ export default function SensorDashboard() {
         </View>
         <View style={styles.metricsRow}>
           <View style={styles.metricItem}>
-            <MaterialCommunityIcons name={isConnected ? getBatteryIcon(batteryPercent) : "battery-unknown"} size={20} color={isConnected ? getBatteryColor(batteryPercent) : "#ccc"} />
-            <Text style={[styles.metricText, { color: isConnected ? getBatteryColor(batteryPercent) : "#ccc" }]}>
-              {isConnected ? `${batteryPercent.toFixed(0)}%` : "--"}
+            <MaterialCommunityIcons 
+                name={getBatteryIcon(batteryPercent || 0)} 
+                size={20} 
+                color={batteryPercent !== null ? getBatteryColor(batteryPercent) : "#ccc"} 
+            />
+            <Text style={[styles.metricText, { color: batteryPercent !== null ? getBatteryColor(batteryPercent) : "#ccc" }]}>
+              {batteryPercent !== null ? `${batteryPercent.toFixed(0)}%` : "--"}
             </Text>
           </View>
         </View>
@@ -133,25 +173,57 @@ export default function SensorDashboard() {
         isOffline={!isConnected}
       />
 
+      {/* BANNER OFFLINE / SIN DATOS */}
+      {!isConnected && (
+          <View style={[styles.offlineBanner, !lastReading && { backgroundColor: '#999' }]}>
+              <MaterialCommunityIcons name={lastReading ? "history" : "database-off"} size={16} color="#fff" />
+              <Text style={styles.offlineText}>
+                  {lastReading 
+                    ? `Viendo último dato: ${formatOfflineDate(lastReading.timestamp)}`
+                    : "Desconectado: Sin datos recientes en este teléfono."}
+              </Text>
+          </View>
+      )}
+
       <ScrollView style={styles.scrollView} contentContainerStyle={styles.scrollContent}>
         {isClimate ? (
           <View style={styles.rowContainer}>
-            <ClimateCard type="temp" value={isConnected ? sensorData.airTemp ?? null : null} />
-            <ClimateCard type="hum" value={isConnected ? sensorData.humidity ?? null : null} />
+            <ClimateCard 
+                type="temp" 
+                value={isConnected ? sensorData.airTemp : (lastReading?.air_temp ?? null)} 
+            />
+            <ClimateCard 
+                type="hum" 
+                value={isConnected ? sensorData.humidity : (lastReading?.humidity ?? null)} 
+            />
           </View>
         ) : (
           <View>
             {[1, 2, 3].map((idx) => {
               const electrodeDb = dbElectrodes.find((e) => e.electrode_index === idx);
-              const rawMv = (sensorData[`moisture${idx}` as keyof SensorData] as number) || 0;
+              
+              // SELECCIÓN DE DATO:
+              let rawMv: number | null = 0;
 
-              // 1. Calcular Hv (Volumétrica) - CORREGIDO: solo 2 argumentos
-              const hv = isConnected ? getMoisture(rawMv, electrodeDb) : 0;
+              if (isConnected) {
+                  rawMv = (sensorData[`moisture${idx}` as keyof SensorData] as number) || null;
+              } else {
+                  if (lastReading) {
+                      const key = `e${idx}_mv`; 
+                      rawMv = lastReading[key]; 
+                  } else {
+                      rawMv = null;
+                  }
+              }
+
+              // Cálculos
+              const hv = getMoisture(rawMv, electrodeDb);
               
-              // 2. Calcular Hg (Gravimétrica) = Hv / Densidad
-              const density = electrodeDb?.density || 0;
-              const hg = (isConnected && density > 0) ? (hv / density) : 0;
-              
+              let hg: number | null = null;
+              if (hv !== null && electrodeDb?.density && electrodeDb.density > 0) {
+                  hg = hv / electrodeDb.density;
+              }
+
               const isCalibrated = !!(electrodeDb && electrodeDb.equations_json && electrodeDb.equations_json !== "[]");
 
               return (
@@ -159,22 +231,34 @@ export default function SensorDashboard() {
                   key={idx}
                   number={idx as 1 | 2 | 3}
                   depthCm={electrodeDb?.depth || 0}
-                  voltageMv={isConnected ? rawMv : 0}
                   
-                  volumetricMoisture={hv}  // Hv
-                  gravimetricMoisture={hg} // Hg (NUEVO)
+                  // FIX 1: Pasamos 0 si es null para satisfacer TypeScript (number), pero isNoData mandará
+                  voltageMv={rawMv ?? 0} 
+                  
+                  // FIX 2: Pasamos 0 si es null (TypeScript error "number | null" -> "number")
+                  volumetricMoisture={hv ?? 0}  
+                  
+                  // FIX 3: Pasamos undefined si es null (TypeScript error "number | null" -> "number | undefined")
+                  gravimetricMoisture={hg ?? undefined}
+                  
+                  // ESTO ES LO IMPORTANTE: Si rawMv es null, mostramos "--"
+                  isNoData={rawMv === null} 
                   
                   isCalibrated={isCalibrated}
                   texture={electrodeDb?.texture || "Sin definir"}
                   onCalibratePress={() => {
-                    if (isConnected) router.push(`/sensor/${sensorIdStr}/calibration?electrode=${idx}`);
+                    router.push(`/sensor/${sensorIdStr}/calibration?electrode=${idx}`);
                   }}
-                  disabled={!isConnected}
+                  disabled={false} 
                 />
               );
             })}
 
-            <ClimateCard type="temp" label="Temp. Suelo" value={isConnected ? sensorData.soilTemp ?? null : null} />
+            <ClimateCard 
+                type="temp" 
+                label="Temp. Suelo" 
+                value={isConnected ? sensorData.soilTemp : (lastReading?.soil_temp ?? null)} 
+            />
           </View>
         )}
 
@@ -190,7 +274,7 @@ export default function SensorDashboard() {
             </View>
             <View style={{ flex: 1 }}>
               <Text style={[styles.btnTitle, !isConnected && { color: "#999" }]}>Descargar Historial SD</Text>
-              <Text style={styles.btnSub}>{isConnected ? "Extraer datos del sensor" : "Requiere Bluetooth"}</Text>
+              <Text style={styles.btnSub}>{isConnected ? "Extraer datos del sensor" : "Requiere conexión Bluetooth"}</Text>
             </View>
             {isConnected && <MaterialCommunityIcons name="chevron-right" size={24} color="#ccc" />}
           </TouchableOpacity>
@@ -233,6 +317,22 @@ const styles = StyleSheet.create({
   metricsRow: { flexDirection: "row", gap: 20 },
   metricItem: { flexDirection: "row", alignItems: "center", gap: 6 },
   metricText: { fontWeight: "bold", fontSize: 15 },
+  
+  offlineBanner: {
+      backgroundColor: "#FF9800",
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      paddingVertical: 8,
+      paddingHorizontal: 16,
+      gap: 8,
+  },
+  offlineText: {
+      color: '#fff',
+      fontWeight: 'bold',
+      fontSize: 12,
+  },
+
   actionButton: { flexDirection: "row", alignItems: "center", backgroundColor: "#fff", padding: 14, borderRadius: 12, marginTop: 10, elevation: 2 },
   btnLocal: { marginTop: 10 },
   btnDisabled: { backgroundColor: "#f0f0f0" },

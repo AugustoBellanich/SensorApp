@@ -14,9 +14,11 @@ import {
     markSensorSynced,
     saveSensor,
 } from "../database/SensorRepository";
+// IMPORTANTE: Importar funciones para guardar lecturas
+import { insertReadingsB01, insertReadingsC01 } from "../database/ReadingsRepository";
 
 // --- TIPOS Y LIB ---
-import { ElectrodeEntity, SensorEntity } from "../database/types";
+import { ElectrodeEntity, ReadingB01, ReadingC01, SensorEntity } from "../database/types";
 import { supabase } from "../lib/supabase";
 
 const LAST_PULL_KEY = "LAST_SYNC_TIMESTAMP";
@@ -29,7 +31,7 @@ export const syncService = {
   },
 
   // ==============================================================================
-  // 1. PUSH (SUBIDA: Local -> Nube)
+  // 1. PUSH (SUBIDA: Local -> Nube) 
   // ==============================================================================
   async pushChanges() {
     console.log("🔄 [SYNC] Iniciando subida de datos...");
@@ -39,18 +41,13 @@ export const syncService = {
         return;
     }
 
-    // ---------------------------------------------------------
-    // A. SUBIR SENSORES PENDIENTES (Tabla: devices)
-    // ---------------------------------------------------------
+    // A. SUBIR SENSORES PENDIENTES
     try {
         const pendingSensors = await getSensorsPendingSync();
-        
         if (pendingSensors.length > 0) {
             console.log(`📤 [SYNC] Subiendo ${pendingSensors.length} sensores...`);
-            
             for (const sensor of pendingSensors) {
                 const cleanId = sensor.id.replace("SEN-", ""); 
-
                 const { error } = await supabase.from("devices").upsert({
                     id: cleanId,
                     alias: sensor.alias,
@@ -62,35 +59,22 @@ export const syncService = {
                     config: JSON.parse(sensor.config_json || "{}"),
                     last_sync: new Date().toISOString(),
                 });
-
-                if (error) {
-                    console.error(`❌ [SYNC] Error subiendo sensor ${cleanId}:`, error.message);
-                } else {
-                    await markSensorSynced(sensor.id);
-                }
+                if (error) console.error(`❌ [SYNC] Error sensor ${cleanId}:`, error.message);
+                else await markSensorSynced(sensor.id);
             }
         }
-    } catch (e) {
-        console.error("❌ [SYNC] Error en bucle de sensores:", e);
-    }
+    } catch (e) { console.error("❌ [SYNC] Error sensores:", e); }
 
-    // ---------------------------------------------------------
-    // B. SUBIR ELECTRODOS PENDIENTES (Tabla: device_electrodes)
-    // ---------------------------------------------------------
+    // B. SUBIR ELECTRODOS PENDIENTES
     try {
-        // Consultamos directamente a SQLite los electrodos marcados como no sincronizados
         const pendingElectrodes = await db.getAllAsync<ElectrodeEntity>(
             "SELECT * FROM device_electrodes WHERE is_synced = 0"
         );
-
         if (pendingElectrodes.length > 0) {
             console.log(`📤 [SYNC] Subiendo ${pendingElectrodes.length} calibraciones...`);
-
-            // Mapeamos los datos locales al formato de Supabase
-            // IMPORTANTE: SQLite guarda JSON como string, Supabase lo quiere como Objeto JSONB
             const electrodesPayload = pendingElectrodes.map(elec => ({
                 id: elec.id,
-                device_id: elec.sensor_id.replace("SEN-", ""), // Traducción: sensor_id -> device_id
+                device_id: elec.sensor_id.replace("SEN-", ""),
                 electrode_index: elec.electrode_index,
                 depth: elec.depth,
                 texture: elec.texture,
@@ -99,25 +83,15 @@ export const syncService = {
                 equations_json: JSON.parse(elec.equations_json || "[]"),
                 updated_at: new Date().toISOString()
             }));
-
-            // Upsert masivo a Supabase (Más eficiente que un bucle for)
-            const { error } = await supabase
-                .from("device_electrodes")
-                .upsert(electrodesPayload);
-
+            const { error } = await supabase.from("device_electrodes").upsert(electrodesPayload);
             if (error) {
-                console.error("❌ [SYNC] Error Supabase al subir electrodos:", error.message);
+                console.error("❌ [SYNC] Error electrodos:", error.message);
             } else {
-                // Si todo sale bien, marcamos como synced en local uno por uno
-                for (const elec of pendingElectrodes) {
-                    await markElectrodeSynced(elec.id);
-                }
-                console.log(`✅ [SYNC] ${pendingElectrodes.length} electrodos sincronizados correctamente.`);
+                for (const elec of pendingElectrodes) await markElectrodeSynced(elec.id);
+                console.log(`✅ [SYNC] Electrodos subidos.`);
             }
         }
-    } catch (e) {
-        console.error("❌ [SYNC] Error consultando/subiendo electrodos:", e);
-    }
+    } catch (e) { console.error("❌ [SYNC] Error electrodos:", e); }
   },
 
   // ==============================================================================
@@ -128,9 +102,8 @@ export const syncService = {
     console.log("🔄 [SYNC] Iniciando PULL completo...");
 
     try {
-        // A. Bajar dispositivos (Devices -> sensors)
+        // A. Bajar Dispositivos
         const { data: remoteDevices, error: devErr } = await supabase.from("devices").select("*");
-        
         if (devErr) throw devErr;
         if (!remoteDevices) return;
 
@@ -138,9 +111,11 @@ export const syncService = {
         const now = new Date().toISOString();
 
         for (const remote of remoteDevices) {
-            // 1. Guardar/Actualizar Sensor Local
+            const localSensorId = remote.id; 
+
+            // 1. Guardar Sensor Local
             const localSensor: SensorEntity = {
-                id: remote.id, // Si usas prefijo SEN- localmente, agrégalo aquí
+                id: localSensorId,
                 alias: remote.alias,
                 type: remote.type as any,
                 location: remote.name_farm,
@@ -148,27 +123,26 @@ export const syncService = {
                 lat: remote.lat,
                 lng: remote.lng,
                 config_json: JSON.stringify(remote.config),
-                is_synced: 1, // Viene de la nube -> está limpio
+                is_synced: 1,
                 updated_at: remote.created_at || now,
             };
-            await saveSensor(localSensor, true); // true = forzar update sin marcar dirty
+            await saveSensor(localSensor, true);
 
-            // 2. Bajar Electrodos de este dispositivo
-            const { data: remoteElecs, error: elecErr } = await supabase
+            // 2. Bajar Electrodos
+            const { data: remoteElecs } = await supabase
                 .from("device_electrodes")
                 .select("*")
                 .eq("device_id", remote.id);
 
-            if (!elecErr && remoteElecs) {
+            if (remoteElecs) {
                 for (const re of remoteElecs) {
                     const localElec: ElectrodeEntity = {
                         id: re.id,
-                        sensor_id: re.device_id, // Si usas prefijo SEN-, ajustarlo aquí
+                        sensor_id: localSensorId,
                         electrode_index: re.electrode_index,
                         depth: re.depth,
                         texture: re.texture,
                         density: re.density,
-                        // Al bajar de Supabase (Objeto) a SQLite (String), hacemos stringify
                         points_json: JSON.stringify(re.points_json),
                         equations_json: JSON.stringify(re.equations_json),
                         is_synced: 1,
@@ -177,15 +151,59 @@ export const syncService = {
                     await saveElectrode(localElec);
                 }
             }
+
+            // ------------------------------------------------------------------
+            // 3. BAJAR ÚLTIMA LECTURA (CORREGIDO: Usar sensor_id)
+            // ------------------------------------------------------------------
+            console.log(`⬇️ [SYNC] Bajando último dato para ${remote.id} (${remote.type})...`);
+            
+            if (remote.type === 'B01') {
+                const { data: readings } = await supabase
+                    .from('readings_b01')
+                    // CORRECCIÓN AQUÍ: Usamos 'sensor_id' en lugar de 'device_id'
+                    .select('*')
+                    .eq('sensor_id', remote.id) 
+                    .order('timestamp', { ascending: false })
+                    .limit(1);
+
+                if (readings && readings.length > 0) {
+                    const mappedReadings = readings.map(r => ({
+                        ...r,
+                        sensor_id: localSensorId, 
+                        is_synced: 1
+                    }));
+                    await insertReadingsB01(mappedReadings as ReadingB01[]);
+                    console.log(`   ✅ Último B01 guardado: ${readings[0].timestamp}`);
+                } else {
+                    console.log(`   ⚠️ No se encontraron lecturas B01 en la nube.`);
+                }
+            } else if (remote.type === 'C01') {
+                const { data: readings } = await supabase
+                    .from('readings_c01')
+                    // CORRECCIÓN AQUÍ: Usamos 'sensor_id'
+                    .select('*')
+                    .eq('sensor_id', remote.id)
+                    .order('timestamp', { ascending: false })
+                    .limit(1);
+
+                if (readings && readings.length > 0) {
+                    const mappedReadings = readings.map(r => ({
+                        ...r,
+                        sensor_id: localSensorId,
+                        is_synced: 1
+                    }));
+                    await insertReadingsC01(mappedReadings as ReadingC01[]);
+                    console.log(`   ✅ Último C01 guardado: ${readings[0].timestamp}`);
+                } else {
+                    console.log(`   ⚠️ No se encontraron lecturas C01 en la nube.`);
+                }
+            }
         }
 
-        // C. Limpieza (Borrar locales que fueron borrados en la nube)
+        // C. Limpieza
         const allLocal = await getAllSensors();
         for (const local of allLocal) {
-            const cleanLocalId = local.id.replace("SEN-", "");
-            // Si está sincronizado (is_synced=1) PERO ya no existe en la lista remota -> Borrar
-            if (local.is_synced === 1 && !allowedIds.includes(cleanLocalId) && !allowedIds.includes(local.id)) {
-                console.log(`🗑️ [SYNC] Eliminando sensor obsoleto: ${local.id}`);
+            if (local.is_synced === 1 && !allowedIds.includes(local.id)) {
                 await deleteSensor(local.id);
             }
         }
@@ -197,9 +215,7 @@ export const syncService = {
     }
   },
 
-  // ==============================================================================
-  // 3. SYNC ALL (Orquestador)
-  // ==============================================================================
+  // 3. SYNC ALL
   async syncAll() {
     try {
       await this.pushChanges();
