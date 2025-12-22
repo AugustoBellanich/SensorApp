@@ -1,30 +1,18 @@
 // app/utils/dataProcessing.ts
 
-// Calcula la MEDIANA (Valor central)
 export const calculateMedian = (values: number[]): number => {
     if (values.length === 0) return 0;
     
-    // 1. Ordenar numéricamente (Crucial)
+    // Ordenar numéricamente para encontrar el centro
     const sorted = [...values].sort((a, b) => a - b);
     const mid = Math.floor(sorted.length / 2);
     
-    // 2. Si es par, promedio de los dos centrales
     if (sorted.length % 2 === 0) {
         return (sorted[mid - 1] + sorted[mid]) / 2;
     }
-    
-    // 3. Si es impar, el del centro
     return sorted[mid];
 };
 
-// Calcula el promedio (solo si lo necesitaras para otra cosa, pero NO lo usaremos hoy)
-export const calculateAverage = (values: number[]): number => {
-    if (values.length === 0) return 0;
-    const sum = values.reduce((a, b) => a + b, 0);
-    return sum / values.length;
-};
-
-// Reduce datos usando MEDIANA
 export const downsampleData = (data: any[], key: string, intervalMs: number): any[] => {
     if (!data || data.length === 0) return [];
 
@@ -32,9 +20,25 @@ export const downsampleData = (data: any[], key: string, intervalMs: number): an
     const timestamps: number[] = [];
 
     data.forEach(item => {
-        const val = item[key];
+        // 1. OBTENER VALOR
+        let val = item[key];
+        
+        // Si el valor no existe o es nulo, saltamos
         if (val === undefined || val === null) return;
-        const bucket = Math.floor(item.timestamp / intervalMs) * intervalMs;
+        
+        // Asegurar que es número
+        val = Number(val);
+        if (isNaN(val)) return;
+
+        // 2. CORRECCIÓN CRÍTICA: TIMESTAMP DE STRING A NUMBER
+        // SQLite devuelve "2025-12-21T...", esto no se puede dividir.
+        const tsNum = new Date(item.timestamp).getTime();
+        
+        if (isNaN(tsNum)) return; // Si la fecha es inválida, saltar
+
+        // 3. AGRUPAR EN CUBETAS (BUCKETS)
+        const bucket = Math.floor(tsNum / intervalMs) * intervalMs;
+        
         if (!grouped[bucket]) {
             grouped[bucket] = [];
             timestamps.push(bucket);
@@ -42,12 +46,15 @@ export const downsampleData = (data: any[], key: string, intervalMs: number): an
         grouped[bucket].push(val);
     });
 
+    // Ordenar cronológicamente
     timestamps.sort((a, b) => a - b);
 
+    // Generar array final
     return timestamps.map(ts => {
+        const medianValue = calculateMedian(grouped[ts]);
         return {
-            timestamp: ts,
-            value: calculateMedian(grouped[ts]), // <--- AQUÍ SE USA MEDIANA PARA EL GRÁFICO
+            timestamp: ts, // Devolvemos número (epoch), el gráfico lo entenderá
+            value: medianValue, 
             originalCount: grouped[ts].length 
         };
     });

@@ -9,104 +9,146 @@ interface Props {
   unit: string;
   color: string;
   referenceLines?: { value: number; label: string; color: string }[];
+  yAxisMax?: number;
+  spacing: number;
 }
+
+// Helper para dar opacidad a los colores Hex
+const hexToRgba = (hex: string, alpha: number) => {
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+};
 
 export default function SensorChart({ 
   data, 
   type, 
   unit, 
   color, 
-  referenceLines = [] 
+  referenceLines = [],
+  yAxisMax,
+  spacing
 }: Props) {
   
   const screenWidth = Dimensions.get('window').width;
-  // Ajustamos ancho para que entre bien en la tarjeta
-  const availableWidth = screenWidth - 60; 
+  const chartWidth = screenWidth - 50; 
 
-  // 1. CÁLCULO DE TECHO (MAX VALUE)
-  const dataMax = Math.max(...data.map(d => d.value));
+  // 1. Sanitización
+  const safeData = data.map(d => ({
+      ...d,
+      value: (typeof d.value === 'number' && !isNaN(d.value)) ? d.value : 0
+  }));
+
+  // 2. Cálculo de Techo
+  const dataMax = safeData.length > 0 ? Math.max(...safeData.map(d => d.value)) : 0;
   
-  // Buscar el valor más alto de las referencias (si existen)
   let refMax = 0;
   if (referenceLines.length > 0) {
     refMax = Math.max(...referenceLines.map(r => r.value));
   }
 
-  // El techo es el máximo entre datos y referencias + 20% de aire
-  // Esto GARANTIZA que las líneas de CC/PMP entren en el gráfico
-  const yAxisMaxValue = Math.max(dataMax, refMax) * 1.2;
+  const calculatedMax = Math.max(dataMax, refMax) * 1.15;
+  const finalMaxValue = yAxisMax ? Math.max(yAxisMax, calculatedMax) : calculatedMax;
+  
+  const validColor = color || Colors.primary;
+
+  // Helper para generar configuración de línea
+  // isBottomLine: true si es la línea de PMP (para asegurarnos que el texto vaya arriba)
+  const getLineConfig = (ref: any, isBottomLine: boolean = false) => {
+      const colorWithOpacity = hexToRgba(ref.color, 0.7); // Opacidad 0.7 en línea y texto
+      
+      return {
+          color: colorWithOpacity,
+          thickness: 1,
+          dashWidth: 5,  // Hace la línea punteada
+          dashGap: 5,    // Espacio entre puntos
+          labelText: ref.label,
+          labelTextStyle: { 
+              color: colorWithOpacity, 
+              fontSize: 12, 
+              fontWeight: '900' as const,
+              marginLeft: 5,   // Padding left solicitado
+              marginTop: -15, // Esto empuja el texto HACIA ARRIBA de la línea
+              opacity: 0.7     // Refuerzo de opacidad en el texto
+          },
+          zIndex: 1000,
+      };
+  };
 
   const commonProps = {
     height: 220,
+    width: chartWidth, 
     scrollable: true,
     initialSpacing: 20,
+    spacing: spacing,
     endSpacing: 50,
-    maxValue: yAxisMaxValue, // <--- ESTO ES LA CLAVE
-    noOfSections: 4,
+    
+    maxValue: finalMaxValue || 10,
+    noOfSections: 5,
     yAxisTextStyle: { color: '#888', fontSize: 10 },
-    xAxisLabelTextStyle: { color: '#888', fontSize: 10 },
-    rulesColor: '#f5f5f5',
+    
+    xAxisLabelTextStyle: { 
+        color: '#888', 
+        fontSize: 9, 
+        textAlign: 'center' as const, 
+        width: 60 
+    },
+    xAxisTextNumberOfLines: 2,
+    rulesColor: '#f0f0f0',
+    rulesType: 'solid',
     yAxisLabelSuffix: '',
     
-    // LÍNEAS DE REFERENCIA
-    showReferenceLine1: referenceLines.length > 0,
-    referenceLine1Config: referenceLines[0] ? {
-      color: referenceLines[0].color,
-      thickness: 2,
-      dashWidth: 6,
-      dashGap: 4,
-      labelText: referenceLines[0].label,
-      labelTextStyle: { color: referenceLines[0].color, fontSize: 10, fontWeight: 'bold' },
-      value: referenceLines[0].value,
-      zIndex: 100, // Forzamos que esté bien arriba
-    } : undefined,
+    // --- LÍNEAS DE REFERENCIA ---
     
+    // Línea 1 (SAT - Arriba)
+    showReferenceLine1: referenceLines.length > 0,
+    referenceLine1Position: referenceLines[0]?.value || 0,
+    referenceLine1Config: referenceLines[0] ? getLineConfig(referenceLines[0]) : undefined,
+    
+    // Línea 2 (CC - Medio)
     showReferenceLine2: referenceLines.length > 1,
-    referenceLine2Config: referenceLines[1] ? {
-      color: referenceLines[1].color,
-      thickness: 2,
-      dashWidth: 6,
-      dashGap: 4,
-      labelText: referenceLines[1].label,
-      labelTextStyle: { color: referenceLines[1].color, fontSize: 10, fontWeight: 'bold' },
-      value: referenceLines[1].value,
-      zIndex: 100,
-    } : undefined,
+    referenceLine2Position: referenceLines[1]?.value || 0,
+    referenceLine2Config: referenceLines[1] ? getLineConfig(referenceLines[1]) : undefined,
+
+    // Línea 3 (PMP - Abajo)
+    // Al usar getLineConfig con marginBottom: 5, aseguramos que el texto quede "sobre" la línea
+    showReferenceLine3: referenceLines.length > 2,
+    referenceLine3Position: referenceLines[2]?.value || 0,
+    referenceLine3Config: referenceLines[2] ? getLineConfig(referenceLines[2], true) : undefined,
   };
 
   return (
     <View style={styles.card}>
-      {/* Título de unidad limpio arriba */}
       <Text style={styles.unitLabel}>{unit}</Text>
 
       <View style={styles.chartWrapper}>
         {type === 'bar' ? (
           <BarChart
             {...commonProps}
-            data={data}
-            barWidth={18}
-            spacing={25}
+            data={safeData}
+            barWidth={Math.max(4, spacing * 0.5)}
             roundedTop
-            frontColor={data[0]?.frontColor ? undefined : color}
-            isAnimated
+            frontColor={validColor}
+            isAnimated={false} 
           />
         ) : (
           <LineChart
             {...commonProps}
-            data={data}
-            color={color}
-            thickness={3}
-            curved
-            isAnimated
-            startFillColor={color}
+            data={safeData}
+            color={validColor}
+            thickness={2.5}
+            curved={true} 
+            curvature={0.2} 
+            areaChart={true} 
+            startFillColor={validColor}
             endFillColor="#ffffff"
             startOpacity={0.2}
             endOpacity={0.0}
-            areaChart
-            // Puntos visibles para entender dónde están los datos
-            hideDataPoints={false}
-            dataPointsColor={color}
-            dataPointsRadius={3}
+            isAnimated={false} 
+            hideDataPoints={spacing < 25}
+            dataPointsColor={validColor}
+            dataPointsRadius={2}
           />
         )}
       </View>
@@ -119,20 +161,22 @@ const styles = StyleSheet.create({
     backgroundColor: '#fff',
     borderRadius: 16,
     paddingVertical: 15,
-    paddingHorizontal: 12,
+    paddingHorizontal: 5,
     marginVertical: 10,
     elevation: 2,
-    shadowColor: '#000', shadowOpacity: 0.1, shadowRadius: 4, shadowOffset: {width:0, height:2},
+    shadowColor: '#000', shadowOpacity: 0.08, shadowRadius: 4, shadowOffset: {width:0, height:2},
     borderWidth: 1, borderColor: '#eee',
   },
   chartWrapper: {
     overflow: 'hidden',
-    marginTop: 10, // Espacio para la etiqueta de unidad
+    marginTop: 5,
   },
   unitLabel: {
     fontSize: 12,
-    fontWeight: 'bold',
+    fontWeight: '800',
     color: Colors.textSecondary,
-    marginLeft: 4
+    marginLeft: 15,
+    marginBottom: 5,
+    textTransform: 'uppercase'
   }
 });

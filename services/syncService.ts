@@ -7,6 +7,7 @@ import {
     markElectrodeSynced,
     saveElectrode
 } from "../database/ElectrodeRepository";
+import { insertReadingsB01, insertReadingsC01 } from "../database/ReadingsRepository";
 import {
     deleteSensor,
     getAllSensors,
@@ -14,14 +15,15 @@ import {
     markSensorSynced,
     saveSensor,
 } from "../database/SensorRepository";
-// IMPORTANTE: Importar funciones para guardar lecturas
-import { insertReadingsB01, insertReadingsC01 } from "../database/ReadingsRepository";
 
 // --- TIPOS Y LIB ---
 import { ElectrodeEntity, ReadingB01, ReadingC01, SensorEntity } from "../database/types";
 import { supabase } from "../lib/supabase";
 
 const LAST_PULL_KEY = "LAST_SYNC_TIMESTAMP";
+
+// VARIABLE DE BLOQUEO (SEMÁFORO)
+let isSyncing = false;
 
 export const syncService = {
   // Verificación de conexión
@@ -152,15 +154,12 @@ export const syncService = {
                 }
             }
 
-            // ------------------------------------------------------------------
-            // 3. BAJAR ÚLTIMA LECTURA (CORREGIDO: Usar sensor_id)
-            // ------------------------------------------------------------------
+            // 3. BAJAR ÚLTIMA LECTURA
             console.log(`⬇️ [SYNC] Bajando último dato para ${remote.id} (${remote.type})...`);
             
             if (remote.type === 'B01') {
                 const { data: readings } = await supabase
                     .from('readings_b01')
-                    // CORRECCIÓN AQUÍ: Usamos 'sensor_id' en lugar de 'device_id'
                     .select('*')
                     .eq('sensor_id', remote.id) 
                     .order('timestamp', { ascending: false })
@@ -174,13 +173,10 @@ export const syncService = {
                     }));
                     await insertReadingsB01(mappedReadings as ReadingB01[]);
                     console.log(`   ✅ Último B01 guardado: ${readings[0].timestamp}`);
-                } else {
-                    console.log(`   ⚠️ No se encontraron lecturas B01 en la nube.`);
                 }
             } else if (remote.type === 'C01') {
                 const { data: readings } = await supabase
                     .from('readings_c01')
-                    // CORRECCIÓN AQUÍ: Usamos 'sensor_id'
                     .select('*')
                     .eq('sensor_id', remote.id)
                     .order('timestamp', { ascending: false })
@@ -194,8 +190,6 @@ export const syncService = {
                     }));
                     await insertReadingsC01(mappedReadings as ReadingC01[]);
                     console.log(`   ✅ Último C01 guardado: ${readings[0].timestamp}`);
-                } else {
-                    console.log(`   ⚠️ No se encontraron lecturas C01 en la nube.`);
                 }
             }
         }
@@ -215,14 +209,22 @@ export const syncService = {
     }
   },
 
-  // 3. SYNC ALL
+  // 3. SYNC ALL (CON SEMÁFORO PARA EVITAR DOBLE EJECUCIÓN)
   async syncAll() {
+    if (isSyncing) {
+        console.log("⏳ [SYNC] Sincronización ya en curso. Ignorando llamada duplicada.");
+        return;
+    }
+
     try {
+      isSyncing = true; // BLOQUEAR
       await this.pushChanges();
       await this.pullChanges();
       console.log("✨ [SYNC] Sincronización Global Finalizada");
     } catch (e) {
       console.error("❌ [SYNC] Error crítico en syncAll:", e);
+    } finally {
+      isSyncing = false; // LIBERAR SIEMPRE
     }
   },
 };
