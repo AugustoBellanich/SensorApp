@@ -276,7 +276,9 @@ export default function SensorDashboard() {
         )}
 
         {/* BOTONES ACCIÓN */}
-        <View style={{ marginTop: 20 }}>
+        <View style={{ marginTop: 20, marginBottom: 40 }}>
+          
+          {/* 1. Botón Descargar SD (Ya lo tenías) */}
           <TouchableOpacity
             style={[styles.actionButton, !isConnected && styles.btnDisabled]}
             disabled={!isConnected}
@@ -292,6 +294,7 @@ export default function SensorDashboard() {
             {isConnected && <MaterialCommunityIcons name="chevron-right" size={24} color="#ccc" />}
           </TouchableOpacity>
 
+          {/* 2. Botón Datos Locales (Ya lo tenías) */}
           <TouchableOpacity
             style={[styles.actionButton, styles.btnLocal]}
             onPress={() => router.push(`/sensor/${sensorIdStr}/local-data`)}
@@ -305,6 +308,22 @@ export default function SensorDashboard() {
             </View>
             <MaterialCommunityIcons name="chevron-right" size={24} color="#ccc" />
           </TouchableOpacity>
+
+          {/* 3. NUEVO BOTÓN: Datos en Nube (AGREGAR ESTO) */}
+          <TouchableOpacity
+            style={[styles.actionButton, styles.btnLocal]}
+            onPress={() => router.push(`/sensor/${sensorIdStr}/cloud-data`)}
+          >
+            <View style={[styles.iconCircle, { backgroundColor: "#42A5F5" }]}>
+              <MaterialCommunityIcons name="cloud-search" size={24} color="#fff" />
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.btnTitle}>Datos en Nube</Text>
+              <Text style={styles.btnSub}>Verificar sincronización remota</Text>
+            </View>
+            <MaterialCommunityIcons name="chevron-right" size={24} color="#ccc" />
+          </TouchableOpacity>
+
         </View>
         <View style={{ height: 40 }} />
       </ScrollView>
