@@ -204,13 +204,29 @@ export default function GatewayConfigScreen() {
     // --- UTILIDADES ---
     const handleSyncRTC = async () => {
         try {
-            const now = new Date().toISOString().replace('T', ' ').split('.')[0];
+            const now = new Date();
+            
+            // 1. Obtener diferencia horaria (en minutos) y convertir a ms
+            const timezoneOffsetMs = now.getTimezoneOffset() * 60000;
+            
+            // 2. Ajustar la fecha para que toISOString devuelva los números de TU reloj local
+            const localDate = new Date(now.getTime() - timezoneOffsetMs);
+            
+            // 3. Formato final: "YYYY-MM-DD HH:mm:ss"
+            const timeString = localDate.toISOString().replace('T', ' ').slice(0, 19);
+
+            console.log(`[RTC] Enviando al Gateway: ${timeString}`);
+
             await connectedDevice?.writeCharacteristicWithResponseForService(
-                BLE_UUIDS.SVC_CONFIG, BLE_UUIDS.CONFIG.RTC_SYNC,
-                Buffer.from(now).toString("base64")
+                BLE_UUIDS.SVC_CONFIG, 
+                BLE_UUIDS.CONFIG.RTC_SYNC,
+                Buffer.from(timeString).toString("base64")
             );
-            Alert.alert("Reloj", "Hora sincronizada correctamente.");
-        } catch (e) { Alert.alert("Error", "Fallo RTC"); }
+            Alert.alert("Reloj", `Hora sincronizada: ${timeString}`);
+        } catch (e) { 
+            console.error(e);
+            Alert.alert("Error", "Fallo RTC"); 
+        }
     };
 
     const handleDeleteData = async () => {

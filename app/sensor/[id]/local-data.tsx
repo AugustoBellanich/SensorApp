@@ -1,20 +1,23 @@
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import DateTimePicker from "@react-native-community/datetimepicker";
 import Slider from "@react-native-community/slider";
+// @ts-ignore
+import * as FileSystem from "expo-file-system/legacy";
 import { Stack, useLocalSearchParams, useRouter } from "expo-router";
+import * as Sharing from "expo-sharing";
 import React, { useCallback, useEffect, useState } from "react";
 import {
-    ActivityIndicator,
-    Alert,
-    ScrollView,
-    StyleSheet,
-    Switch,
-    Text,
-    TouchableOpacity,
-    View,
+  ActivityIndicator,
+  Alert,
+  Modal,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
 } from "react-native";
-
 import { useSafeAreaInsets } from "react-native-safe-area-context";
+import * as XLSX from "xlsx";
 
 // Componentes
 import SegmentedControl from "../../../components/global/SegmentedControl";
@@ -24,12 +27,15 @@ import { Colors } from "../../../constants/Colors";
 
 // DB & Lógica
 import { getElectrodesBySensor } from "../../../database/ElectrodeRepository";
-import { getReadingsInRange } from "../../../database/ReadingsRepository";
+import {
+  deleteReadingsRange,
+  getReadingsInRange,
+} from "../../../database/ReadingsRepository";
 import { getSensorById } from "../../../database/SensorRepository";
 import {
-    ElectrodeEntity,
-    LinearSegment,
-    SensorEntity,
+  ElectrodeEntity,
+  LinearSegment,
+  SensorEntity,
 } from "../../../database/types";
 
 // Utils
@@ -48,6 +54,7 @@ export default function LocalDataScreen() {
 
   // Estados
   const [loading, setLoading] = useState(false);
+  const [loadingMessage, setLoadingMessage] = useState(""); // Mensaje del Overlay
   const [sensorDb, setSensorDb] = useState<SensorEntity | null>(null);
 
   // Filtros
@@ -60,7 +67,7 @@ export default function LocalDataScreen() {
   // Configs
   const [viewMode, setViewMode] = useState<ViewMode>("optimized");
   const [unit, setUnit] = useState<UnitType>("% Hv");
-  const [spacing, setSpacing] = useState<number>(30); // Zoom por defecto
+  const [spacing, setSpacing] = useState<number>(30);
 
   const [electrodesInfo, setElectrodesInfo] = useState<
     Record<number, ElectrodeEntity>
@@ -68,6 +75,7 @@ export default function LocalDataScreen() {
   const [electrodeConfig, setElectrodeConfig] = useState<
     Record<number, LinearSegment[]>
   >({});
+  const [densities, setDensities] = useState<Record<number, number>>({});
   const [isConfigLoaded, setIsConfigLoaded] = useState(false);
 
   // Datos
@@ -87,6 +95,8 @@ export default function LocalDataScreen() {
         const elecs = await getElectrodesBySensor(sensorId);
         const infoMap: Record<number, ElectrodeEntity> = {};
         const configMap: Record<number, LinearSegment[]> = {};
+        const densityMap: Record<number, number> = {};
+
         elecs.forEach((e) => {
           infoMap[e.electrode_index] = e;
           if (e.equations_json) {
@@ -94,37 +104,33 @@ export default function LocalDataScreen() {
               configMap[e.electrode_index] = JSON.parse(e.equations_json);
             } catch {}
           }
+          densityMap[e.electrode_index] =
+            e.density && e.density > 0 ? e.density : 1.3;
         });
         setElectrodesInfo(infoMap);
         setElectrodeConfig(configMap);
+        setDensities(densityMap);
       }
       setIsConfigLoaded(true);
     };
     loadConfig();
   }, [sensorId]);
 
-  // --- HELPERS VISUALES (BLINDADOS) ---
+  // --- HELPERS VISUALES ---
   const formatChart = useCallback(
     (arr: any[]) => {
       if (!arr || arr.length === 0) return [];
-
-      // Control de etiquetas según zoom
       const pixelsPerLabel = 60;
       let step = Math.ceil(pixelsPerLabel / spacing);
       if (step < 1) step = 1;
-
       let lastDateString = "";
 
       return arr.map((p, index) => {
-        // BLINDAJE CONTRA NaN
         const val = Number(p.value);
         if (isNaN(val)) return { value: 0, label: "" };
-
         const ts = new Date(p.timestamp).getTime();
         const d = new Date(ts);
         let label = "";
-
-        // Mostrar etiqueta si toca el paso o es el último punto
         if (index % step === 0 || index === arr.length - 1) {
           const dateStr = d.getDate() + "/" + (d.getMonth() + 1);
           const timeStr = d.toLocaleTimeString([], {
@@ -154,14 +160,13 @@ export default function LocalDataScreen() {
     };
   }, []);
 
-  // --- PROCESAMIENTO B01 ---
+  // --- PROCESAMIENTO ---
   const processB01 = useCallback(
     (data: any[]) => {
       const processed = data.map((d) => {
         const mv1 = Number(d.e1_mv);
         const mv2 = Number(d.e2_mv);
         const mv3 = Number(d.e3_mv);
-
         let v1 = mv1,
           v2 = mv2,
           v3 = mv3;
@@ -169,14 +174,12 @@ export default function LocalDataScreen() {
           const rho1 = electrodesInfo[1]?.density || 1.3;
           const rho2 = electrodesInfo[2]?.density || 1.3;
           const rho3 = electrodesInfo[3]?.density || 1.3;
-
           if (electrodeConfig[1])
             v1 = calculateMoistureFromSegments(mv1, electrodeConfig[1]);
           if (electrodeConfig[2])
             v2 = calculateMoistureFromSegments(mv2, electrodeConfig[2]);
           if (electrodeConfig[3])
             v3 = calculateMoistureFromSegments(mv3, electrodeConfig[3]);
-
           if (unit === "% Hg") {
             v1 /= rho1;
             v2 /= rho2;
@@ -189,14 +192,17 @@ export default function LocalDataScreen() {
       const prep = (key: string) => {
         let finalData;
 
-        // Lógica del SWITCH Optimizado/Real
+        // FILTRO DE CALIDAD (Quitar ceros)
+        const validData = processed.filter((p) => {
+          const v = p[key];
+          return v !== undefined && v !== null && !isNaN(v) && v > 0;
+        });
+
         if (viewMode === "optimized") {
-          const interval = 3600 * 1000; // 1h
-          // downsample devuelve {value, timestamp}
-          finalData = downsampleData(processed, key, interval);
+          const interval = 3600 * 1000;
+          finalData = downsampleData(validData, key, interval);
         } else {
-          // Real: Mapeo directo
-          finalData = processed.map((p) => ({
+          finalData = validData.map((p) => ({
             timestamp: p.timestamp,
             value: p[key],
           }));
@@ -211,16 +217,21 @@ export default function LocalDataScreen() {
     [unit, electrodesInfo, electrodeConfig, formatChart, calcStats, viewMode]
   );
 
-  // --- PROCESAMIENTO C01 ---
   const processC01 = useCallback(
     (data: any[]) => {
       const prep = (key: string) => {
         let finalData;
+
+        const validData = data.filter((p) => {
+          const v = p[key];
+          return v !== undefined && v !== null && !isNaN(v) && v > 0; 
+        });
+
         if (viewMode === "optimized") {
           const interval = 3600 * 1000;
-          finalData = downsampleData(data, key, interval);
+          finalData = downsampleData(validData, key, interval);
         } else {
-          finalData = data.map((p) => ({
+          finalData = validData.map((p) => ({
             timestamp: p.timestamp,
             value: p[key],
           }));
@@ -244,8 +255,20 @@ export default function LocalDataScreen() {
 
   const processData = useCallback(
     (data: any[], type: "B01" | "C01") => {
-      if (type === "B01") processB01(data);
-      else processC01(data);
+      // Activar Loading brevemente al procesar datos para evitar freeze visual
+      if (data.length > 500) { 
+          setLoading(true);
+          setLoadingMessage("Procesando gráficos...");
+          // Usar setTimeout para permitir que el UI se actualice antes de bloquear el hilo JS
+          setTimeout(() => {
+              if (type === "B01") processB01(data);
+              else processC01(data);
+              setLoading(false);
+          }, 50);
+      } else {
+          if (type === "B01") processB01(data);
+          else processC01(data);
+      }
     },
     [processB01, processC01]
   );
@@ -254,16 +277,25 @@ export default function LocalDataScreen() {
   const handleSearchData = useCallback(
     async (sensor: SensorEntity, start: Date, end: Date) => {
       if (sensor.type !== "B01" && sensor.type !== "C01") return;
+      
       setLoading(true);
+      setLoadingMessage("Consultando base de datos...");
+      
       try {
         const s = new Date(start);
         s.setHours(0, 0, 0, 0);
         const e = new Date(end);
         e.setHours(23, 59, 59, 999);
         const type = sensor.type as "B01" | "C01";
+        
+        // Simular un pequeño delay para que el usuario vea el loader
+        await new Promise(r => setTimeout(r, 100));
+
         const data = await getReadingsInRange(sensorId, type, s, e);
+        
         if (data && data.length > 0) {
           setLocalData(data);
+          // ProcessData manejará su propio loading si es pesado
           processData(data, type);
         } else {
           setLocalData([]);
@@ -279,15 +311,101 @@ export default function LocalDataScreen() {
     [sensorId, processData]
   );
 
-  // Efectos
   useEffect(() => {
     if (isConfigLoaded && sensorDb)
       handleSearchData(sensorDb, dateStart, dateEnd);
   }, [isConfigLoaded, dateStart, dateEnd, handleSearchData, sensorDb]);
+
+  // Recalcular gráficos si cambian los parámetros de visualización
   useEffect(() => {
-    if (localData.length > 0 && sensorDb)
-      processData(localData, sensorDb.type as "B01" | "C01");
+    if (localData.length > 0 && sensorDb) {
+        processData(localData, sensorDb.type as "B01" | "C01");
+    }
   }, [unit, viewMode, localData, sensorDb, processData]);
+
+  // --- ACTIONS ---
+
+  // 1. Exportar Excel
+  const handleExportExcel = async () => {
+    if (localData.length === 0)
+      return Alert.alert("Sin datos", "No hay datos para exportar.");
+    try {
+      setLoading(true);
+      setLoadingMessage("Generando Excel...");
+      
+      // Delay para que se muestre el overlay
+      await new Promise(r => setTimeout(r, 100));
+
+      const isB01 = sensorDb?.type === "B01";
+      const dataToExport = localData.map((item) => {
+        const row: any = {
+          Fecha: new Date(item.timestamp).toLocaleString("es-AR"),
+        };
+        if (isB01) {
+          row["Temp. Suelo"] = item.soil_temp;
+          [1, 2, 3].forEach((idx) => {
+            const mv = item[`e${idx}_mv`];
+            row[`E${idx} mV`] = mv;
+            const segs = electrodeConfig[idx];
+            let hv = 0;
+            if (segs) hv = calculateMoistureFromSegments(mv, segs);
+            row[`E${idx} Hv`] = Number(hv.toFixed(2));
+          });
+        } else {
+          row["Temp"] = item.air_temp;
+          row["Hum"] = item.humidity;
+        }
+        return row;
+      });
+      const ws = XLSX.utils.json_to_sheet(dataToExport);
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, "Datos");
+      const wbout = XLSX.write(wb, { type: "base64", bookType: "xlsx" });
+      // @ts-ignore
+      const uri = FileSystem.cacheDirectory + `Sensor_${sensorId}.xlsx`;
+      await FileSystem.writeAsStringAsync(uri, wbout, { encoding: "base64" });
+      
+      setLoading(false); // Quitar overlay antes de compartir
+      if (await Sharing.isAvailableAsync()) await Sharing.shareAsync(uri);
+    } catch (e) {
+      setLoading(false);
+      Alert.alert("Error", "Falló la exportación");
+    }
+  };
+
+  // 2. Eliminar Datos
+  const handleDeleteData = () => {
+    Alert.alert(
+      "¿Eliminar datos?",
+      `Se borrarán permanentemente los registros del ${dateStart.toLocaleDateString()} al ${dateEnd.toLocaleDateString()}.\n\nEsta acción no se puede deshacer.`,
+      [
+        { text: "Cancelar", style: "cancel" },
+        {
+          text: "Eliminar",
+          style: "destructive",
+          onPress: async () => {
+            try {
+              setLoading(true);
+              setLoadingMessage("Eliminando datos...");
+              await deleteReadingsRange(
+                sensorId,
+                sensorDb!.type as any,
+                dateStart,
+                dateEnd
+              );
+              // Recargar
+              handleSearchData(sensorDb!, dateStart, dateEnd);
+              Alert.alert("Eliminado", "Datos borrados correctamente.");
+            } catch (e) {
+              Alert.alert("Error", "No se pudieron borrar los datos.");
+            } finally {
+              setLoading(false);
+            }
+          },
+        },
+      ]
+    );
+  };
 
   const onDateChange = (event: any, selectedDate?: Date) => {
     const type = showPicker;
@@ -324,7 +442,7 @@ export default function LocalDataScreen() {
 
       <ScrollView
         contentContainerStyle={{ paddingBottom: 100 }}
-        scrollEnabled={true}
+        scrollEnabled={!loading} // Bloquear scroll si carga
       >
         {/* Filtros */}
         <View style={styles.filterCard}>
@@ -354,16 +472,44 @@ export default function LocalDataScreen() {
             }
             disabled={loading}
           >
-            {loading ? (
-              <ActivityIndicator color="#fff" />
-            ) : (
               <>
                 <MaterialCommunityIcons name="magnify" size={24} color="#fff" />
                 <Text style={styles.searchBtnText}>Consultar Datos</Text>
               </>
-            )}
           </TouchableOpacity>
         </View>
+
+        {/* --- BARRA DE HERRAMIENTAS --- */}
+        {localData.length > 0 && (
+          <View style={styles.toolbar}>
+            <TouchableOpacity
+              style={[styles.toolBtn, { backgroundColor: "#E8F5E9" }]}
+              onPress={handleExportExcel}
+              disabled={loading}
+            >
+              <MaterialCommunityIcons
+                name="microsoft-excel"
+                size={22}
+                color="#2E7D32"
+              />
+              <Text style={[styles.toolText, { color: "#2E7D32" }]}>Excel</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.toolBtn, { backgroundColor: "#FFEBEE" }]}
+              onPress={handleDeleteData}
+              disabled={loading}
+            >
+              <MaterialCommunityIcons
+                name="trash-can-outline"
+                size={22}
+                color="#D32F2F"
+              />
+              <Text style={[styles.toolText, { color: "#D32F2F" }]}>
+                Borrar
+              </Text>
+            </TouchableOpacity>
+          </View>
+        )}
 
         {/* Controles */}
         {localData.length > 0 && (
@@ -380,29 +526,50 @@ export default function LocalDataScreen() {
               </View>
             )}
 
-            <View style={styles.viewModeToggleRow}>
-              <Text
+            {/* --- SWITCH MEJORADO --- */}
+            <View style={styles.switchContainer}>
+              <TouchableOpacity
                 style={[
-                  styles.viewModeLabel,
-                  viewMode === "optimized" && styles.activeModeText,
+                  styles.switchOption,
+                  viewMode === "optimized" && styles.switchActive,
                 ]}
+                onPress={() => setViewMode("optimized")}
               >
-                Optimizado
-              </Text>
-              <Switch
-                value={viewMode === "real"}
-                onValueChange={(val) => setViewMode(val ? "real" : "optimized")}
-                trackColor={{ false: "#e0e0e0", true: Colors.primary }}
-                thumbColor={"#fff"}
-              />
-              <Text
+                <MaterialCommunityIcons
+                  name="chart-bell-curve-cumulative"
+                  size={18}
+                  color={viewMode === "optimized" ? "#fff" : "#666"}
+                />
+                <Text
+                  style={[
+                    styles.switchText,
+                    viewMode === "optimized" && styles.switchTextActive,
+                  ]}
+                >
+                  Optimizado
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity
                 style={[
-                  styles.viewModeLabel,
-                  viewMode === "real" && styles.activeModeText,
+                  styles.switchOption,
+                  viewMode === "real" && styles.switchActive,
                 ]}
+                onPress={() => setViewMode("real")}
               >
-                Real
-              </Text>
+                <MaterialCommunityIcons
+                  name="chart-line-variant"
+                  size={18}
+                  color={viewMode === "real" ? "#fff" : "#666"}
+                />
+                <Text
+                  style={[
+                    styles.switchText,
+                    viewMode === "real" && styles.switchTextActive,
+                  ]}
+                >
+                  Datos Reales
+                </Text>
+              </TouchableOpacity>
             </View>
 
             <View style={styles.sliderContainer}>
@@ -453,11 +620,6 @@ export default function LocalDataScreen() {
 
             {[1, 2, 3].map((num) => {
               const refLines = getAgronomicLines(electrodesInfo[num], unit);
-
-              // DEBUG: Verifica si se están generando las líneas
-              if (num === 1)
-                console.log(`[DEBUG LÍNEAS E1]`, JSON.stringify(refLines));
-
               let maxY = undefined;
               const satLine = refLines.find((l) => l.label === "SAT");
               if (satLine && satLine.value > 0) maxY = satLine.value + 5;
@@ -487,7 +649,6 @@ export default function LocalDataScreen() {
         {/* CLIMA C01 */}
         {sensorDb?.type === "C01" && climateData && (
           <View style={styles.content}>
-            {/* Agro Panel... */}
             <View style={styles.chartBox}>
               <Text style={styles.sectionTitle}>Temperatura (°C)</Text>
               <SensorChart
@@ -520,6 +681,17 @@ export default function LocalDataScreen() {
           />
         )}
       </ScrollView>
+
+      {/* --- OVERLAY DE CARGA (NUEVO) --- */}
+      <Modal transparent={true} animationType="fade" visible={loading}>
+        <View style={styles.loadingOverlay}>
+            <View style={styles.loadingContainer}>
+                <ActivityIndicator size="large" color={Colors.primary} />
+                <Text style={styles.loadingText}>{loadingMessage || "Cargando..."}</Text>
+            </View>
+        </View>
+      </Modal>
+
     </View>
   );
 }
@@ -576,17 +748,52 @@ const styles = StyleSheet.create({
   },
   searchBtnText: { color: "#fff", fontWeight: "bold", fontSize: 16 },
 
-  controlsContainer: { paddingHorizontal: 16, marginBottom: 15 },
-
-  viewModeToggleRow: {
+  // --- TOOLBAR (EXCEL / DELETE) ---
+  toolbar: {
     flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
+    paddingHorizontal: 16,
     marginBottom: 15,
     gap: 10,
   },
-  viewModeLabel: { fontSize: 14, color: "#999" },
-  activeModeText: { color: Colors.primary, fontWeight: "bold" },
+  toolBtn: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 12,
+    borderRadius: 10,
+    gap: 5,
+  },
+  toolText: { fontWeight: "bold", fontSize: 14 },
+
+  controlsContainer: { paddingHorizontal: 16, marginBottom: 15 },
+
+  // --- SWITCH MEJORADO ---
+  switchContainer: {
+    flexDirection: "row",
+    backgroundColor: "#e0e0e0",
+    borderRadius: 8,
+    padding: 3,
+    marginBottom: 15,
+  },
+  switchOption: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    paddingVertical: 8,
+    borderRadius: 6,
+    gap: 6,
+  },
+  switchActive: {
+    backgroundColor: Colors.primary,
+    shadowColor: "#000",
+    shadowOpacity: 0.1,
+    shadowRadius: 2,
+    elevation: 1,
+  },
+  switchText: { fontSize: 12, fontWeight: "600", color: "#666" },
+  switchTextActive: { color: "#fff" },
 
   sliderContainer: {
     backgroundColor: "#fff",
@@ -610,20 +817,25 @@ const styles = StyleSheet.create({
     color: Colors.textPrimary,
     marginBottom: 8,
   },
-  unitSuffix: {
-    fontSize: 12,
-    fontWeight: "normal",
-    color: Colors.textSecondary,
+  
+  // --- OVERLAY STYLES ---
+  loadingOverlay: {
+      flex: 1,
+      backgroundColor: 'rgba(0,0,0,0.5)',
+      justifyContent: 'center',
+      alignItems: 'center',
   },
-
-  agroPanel: {
-    flexDirection: "row",
-    backgroundColor: "#fff",
-    borderRadius: 12,
-    padding: 15,
-    marginBottom: 20,
-    borderWidth: 1,
-    borderColor: "#eee",
-    justifyContent: "space-between",
+  loadingContainer: {
+      backgroundColor: '#fff',
+      padding: 25,
+      borderRadius: 12,
+      alignItems: 'center',
+      elevation: 5
   },
+  loadingText: {
+      marginTop: 15,
+      fontSize: 16,
+      fontWeight: 'bold',
+      color: Colors.textPrimary
+  }
 });

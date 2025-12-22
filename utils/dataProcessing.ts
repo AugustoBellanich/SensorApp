@@ -20,23 +20,19 @@ export const downsampleData = (data: any[], key: string, intervalMs: number): an
     const timestamps: number[] = [];
 
     data.forEach(item => {
-        // 1. OBTENER VALOR
         let val = item[key];
         
-        // Si el valor no existe o es nulo, saltamos
         if (val === undefined || val === null) return;
-        
-        // Asegurar que es número
         val = Number(val);
-        if (isNaN(val)) return;
-
-        // 2. CORRECCIÓN CRÍTICA: TIMESTAMP DE STRING A NUMBER
-        // SQLite devuelve "2025-12-21T...", esto no se puede dividir.
-        const tsNum = new Date(item.timestamp).getTime();
         
-        if (isNaN(tsNum)) return; // Si la fecha es inválida, saltar
+        // --- FILTRO DE CALIDAD ---
+        // Si el valor es exactamente 0, lo consideramos error de lectura y lo saltamos.
+        // (A menos que tu sensor realmente mida 0 absoluto, lo cual es raro en agricultura)
+        if (isNaN(val) || val === 0) return; 
 
-        // 3. AGRUPAR EN CUBETAS (BUCKETS)
+        const tsNum = new Date(item.timestamp).getTime();
+        if (isNaN(tsNum)) return;
+
         const bucket = Math.floor(tsNum / intervalMs) * intervalMs;
         
         if (!grouped[bucket]) {
@@ -46,15 +42,12 @@ export const downsampleData = (data: any[], key: string, intervalMs: number): an
         grouped[bucket].push(val);
     });
 
-    // Ordenar cronológicamente
     timestamps.sort((a, b) => a - b);
 
-    // Generar array final
     return timestamps.map(ts => {
-        const medianValue = calculateMedian(grouped[ts]);
         return {
-            timestamp: ts, // Devolvemos número (epoch), el gráfico lo entenderá
-            value: medianValue, 
+            timestamp: ts,
+            value: calculateMedian(grouped[ts]), 
             originalCount: grouped[ts].length 
         };
     });

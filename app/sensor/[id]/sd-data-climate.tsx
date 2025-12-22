@@ -130,13 +130,12 @@ const ExportableChartCard = ({
                 {/* 3. Gráfico (Visible) */}
                 <View style={{marginTop: 10, overflow: 'hidden'}}>
                      <SensorChart 
-                        data={data} 
-                        type={type} 
-                        unit={unit} 
-                        color={color} 
-                        // Líneas de referencia solo para temperatura
-                        referenceLines={unit === '°C' ? [{value:0, label:'0°C', color:'#00bfa5'}, {value:7.2, label:'7.2°C', color:'#004aad'}] : []}
-                     />
+              data={data}
+              type={type}
+              unit={unit}
+              color={color}
+              // Líneas de referencia solo para temperatura
+              referenceLines={unit === '°C' ? [{ value: 0, label: '0°C', color: '#00bfa5' }, { value: 7.2, label: '7.2°C', color: '#004aad' }] : []} spacing={60}                     />
                 </View>
                 
                 {/* 4. Footer Metadata */}

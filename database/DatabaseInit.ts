@@ -1,8 +1,8 @@
 import * as SQLite from "expo-sqlite";
 
-// Abrir la base de datos de forma síncrona (nueva API de Expo SDK 50+)
-// AL CAMBIAR EL NOMBRE A V3, FORZAMOS UNA DB NUEVA Y LIMPIA
-export const db = SQLite.openDatabaseSync("agrosense_V3.db");
+// Abrir la base de datos de forma síncrona
+// AL CAMBIAR EL NOMBRE A V4, FORZAMOS UNA DB NUEVA Y LIMPIA CON LA NUEVA ESTRUCTURA
+export const db = SQLite.openDatabaseSync("agrosense_V4.db");
 
 export const initDatabase = async () => {
   try {
@@ -39,7 +39,7 @@ export const initDatabase = async () => {
       );
     `);
 
-    // 2. Tabla de LECTURAS B01 (Suelo)
+    // 2. Tabla de LECTURAS B01 (Suelo) - CORREGIDA CON updated_at
     await db.execAsync(`
       CREATE TABLE IF NOT EXISTS readings_b01 (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -56,6 +56,7 @@ export const initDatabase = async () => {
         
         -- Sync
         is_synced INTEGER DEFAULT 0,
+        updated_at TEXT,  -- <--- AGREGADO (Para que funcione el UPSERT)
         
         FOREIGN KEY (sensor_id) REFERENCES sensors (id) ON DELETE CASCADE
       );
@@ -65,7 +66,7 @@ export const initDatabase = async () => {
       CREATE INDEX IF NOT EXISTS idx_b01_synced ON readings_b01 (is_synced);
     `);
 
-    // 3. Tabla de LECTURAS C01 (Clima)
+    // 3. Tabla de LECTURAS C01 (Clima) - CORREGIDA CON updated_at
     await db.execAsync(`
       CREATE TABLE IF NOT EXISTS readings_c01 (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -77,6 +78,7 @@ export const initDatabase = async () => {
         
         -- Sync
         is_synced INTEGER DEFAULT 0,
+        updated_at TEXT, -- <--- AGREGADO
 
         FOREIGN KEY (sensor_id) REFERENCES sensors (id) ON DELETE CASCADE
       );
@@ -85,7 +87,6 @@ export const initDatabase = async () => {
     `);
 
     // 4. Tabla de CALIBRACIÓN DE ELECTRODOS
-    // NOTA: Aquí 'id' es la Primary Key única (ej: SENSOR_E1), permitiendo múltiples electrodos por sensor.
     await db.execAsync(`
       CREATE TABLE IF NOT EXISTS device_electrodes (
         id TEXT PRIMARY KEY NOT NULL,     -- Formato: sensorId_E1 (ej: B01-001_E1)
@@ -107,7 +108,7 @@ export const initDatabase = async () => {
       );
     `);
 
-    console.log("[DB] Inicialización completada. Sistema listo (V3).");
+    console.log("[DB] Inicialización completada. Sistema listo (V4).");
   } catch (error) {
     console.error("[DB] ❌ Error fatal iniciando BD:", error);
   }
