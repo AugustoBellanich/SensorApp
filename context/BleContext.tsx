@@ -31,7 +31,6 @@ const withTimeout = <T,>(
   ]);
 };
 
-// 20s para dar margen en situaciones de bajo consumo
 const CONNECTION_TIMEOUT_MS = 20000;
 
 const logTrace = (step: string, msg: string) =>
@@ -97,15 +96,23 @@ const INITIAL_DIAGNOSIS_STATUS: DiagnosisStatus = {
   rtcStatus: "ERROR",
 };
 
-// --- HELPERS DECODIFICACIÓN ---
+// --- HELPERS DECODIFICACIÓN REFORZADOS (ANTI-CRASH) ---
 const base64ToUtf8 = (value?: string | null): string => {
-  if (!value) return "";
-  return Buffer.from(value, "base64").toString("utf8").trim();
+  try {
+    if (!value || value.length < 2) return "";
+    return Buffer.from(value, "base64").toString("utf8").trim();
+  } catch {
+    return "";
+  }
 };
+
 const decodeNumericString = (value?: string | null): number => {
   const str = base64ToUtf8(value);
-  return parseFloat(str) || NaN;
+  if (!str) return NaN;
+  const num = parseFloat(str);
+  return isNaN(num) ? NaN : num;
 };
+
 const decodeBinaryByte = (value?: string | null): number => {
   if (!value) return 0;
   try {
@@ -115,6 +122,7 @@ const decodeBinaryByte = (value?: string | null): number => {
     return 0;
   }
 };
+
 const parseBooleanString = (val?: string | null): boolean => {
   const text = base64ToUtf8(val);
   return text.includes("1");
@@ -134,7 +142,6 @@ export const BleProvider = ({ children }: { children: React.ReactNode }) => {
   if (!managerRef.current) managerRef.current = new BleManager();
   const manager = managerRef.current;
 
-  // Estados
   const [isScanning, setIsScanning] = useState(false);
   const [isBusy, setIsBusy] = useState(false);
   const [connectedDevice, setConnectedDevice] = useState<Device | null>(null);
@@ -156,14 +163,15 @@ export const BleProvider = ({ children }: { children: React.ReactNode }) => {
     setScannedDevices([]);
   }, []);
 
-  // --- LECTURA SEGURA ---
   const safeReadCharacteristic = useCallback(
     async (deviceId: string, serviceUUID: string, charUUID: string): Promise<string | null> => {
       return withTimeout(
         (async () => {
           try {
+            const isAlive = await manager.isDeviceConnected(deviceId);
+            if (!isAlive) return null;
             const char = await manager.readCharacteristicForDevice(deviceId, serviceUUID, charUUID);
-            return char.value;
+            return char?.value || null;
           } catch {
             return null;
           }
@@ -196,18 +204,15 @@ export const BleProvider = ({ children }: { children: React.ReactNode }) => {
     return true;
   }, []);
 
-  // --- HELPERS INTERNOS ---
   const getDeviceInfo = useCallback(async (device: Device): Promise<SensorInfo> => {
     let rawModel = "UNKNOWN";
     let macAddress = device.id;
-
     try {
       const modelChar = await device.readCharacteristicForService(BLE_UUIDS.SVC_DEVICE_INFO, BLE_UUIDS.CHAR_MODEL_NUM).catch(() => null);
       if (modelChar?.value) rawModel = base64ToUtf8(modelChar.value);
-
       const serialChar = await device.readCharacteristicForService(BLE_UUIDS.SVC_DEVICE_INFO, BLE_UUIDS.CHAR_SERIAL_NUM).catch(() => null);
       if (serialChar?.value) macAddress = base64ToUtf8(serialChar.value);
-    } catch { /* Ignorar error */ }
+    } catch {}
 
     if (rawModel === "UNKNOWN" || getDeviceCategory(rawModel) === "UNKNOWN") {
       const name = device.name || "";
@@ -215,41 +220,38 @@ export const BleProvider = ({ children }: { children: React.ReactNode }) => {
       else if (name.includes("C01")) rawModel = "C01";
       else if (name.includes("A01")) rawModel = "A01";
       else if (name.includes("N01")) rawModel = "N01";
-      console.log(`[BLE-FIX] Modelo inferido: ${rawModel}`);
     }
-
-    return {
-      modelNumber: rawModel,
-      macAddress: macAddress,
-      category: getDeviceCategory(rawModel),
-    };
+    return { modelNumber: rawModel, macAddress: macAddress, category: getDeviceCategory(rawModel) };
   }, []);
 
+  // --- DIAGNOSIS SECUENCIAL (EVITA CRASHES POR BATCH) ---
   const readDiagnosisAndConfig = useCallback(async (device: Device, category: DeviceCategory): Promise<DiagnosisStatus> => {
+    let status: DiagnosisStatus = { ...INITIAL_DIAGNOSIS_STATUS };
     try {
-      logTrace("DIAGNOSIS", "Leyendo estado...");
+      logTrace("DIAGNOSIS", "Iniciando lectura secuencial...");
+      
       const rtcSync = await safeReadCharacteristic(device.id, BLE_UUIDS.SVC_CONFIG, BLE_UUIDS.CONFIG.RTC_SYNC);
-      await sleep(50);
-      const [sdEn, loraEn] = await Promise.all([
-        safeReadCharacteristic(device.id, BLE_UUIDS.SVC_CONFIG, BLE_UUIDS.CONFIG.SD_ENABLE),
-        safeReadCharacteristic(device.id, BLE_UUIDS.SVC_CONFIG, BLE_UUIDS.CONFIG.LORA_ENABLE),
-      ]);
-      await sleep(50);
-      const [sdSt, loraSt, rtcSt] = await Promise.all([
-        safeReadCharacteristic(device.id, BLE_UUIDS.SVC_STATUS, BLE_UUIDS.CHAR_SD_STATUS),
-        safeReadCharacteristic(device.id, BLE_UUIDS.SVC_STATUS, BLE_UUIDS.CHAR_LORA_STATUS),
-        safeReadCharacteristic(device.id, BLE_UUIDS.SVC_STATUS, BLE_UUIDS.CHAR_RTC_STATUS),
-      ]);
+      await sleep(100);
+      const sdEn = await safeReadCharacteristic(device.id, BLE_UUIDS.SVC_CONFIG, BLE_UUIDS.CONFIG.SD_ENABLE);
+      await sleep(100);
+      const loraEn = await safeReadCharacteristic(device.id, BLE_UUIDS.SVC_CONFIG, BLE_UUIDS.CONFIG.LORA_ENABLE);
+      await sleep(100);
+      const sdSt = await safeReadCharacteristic(device.id, BLE_UUIDS.SVC_STATUS, BLE_UUIDS.CHAR_SD_STATUS);
+      await sleep(100);
+      const loraSt = await safeReadCharacteristic(device.id, BLE_UUIDS.SVC_STATUS, BLE_UUIDS.CHAR_LORA_STATUS);
+      await sleep(100);
+      const rtcSt = await safeReadCharacteristic(device.id, BLE_UUIDS.SVC_STATUS, BLE_UUIDS.CHAR_RTC_STATUS);
 
-      let wifiStatus, lastSync, sensorsList;
       if (category === "GATEWAY") {
-        await sleep(100);
+        await sleep(150);
         const ws = await safeReadCharacteristic(device.id, BLE_UUIDS.SVC_STATUS, BLE_UUIDS.STATUS.WIFI_STATUS);
-        wifiStatus = base64ToUtf8(ws);
+        status.wifiStatus = base64ToUtf8(ws);
+        await sleep(100);
         const ls = await safeReadCharacteristic(device.id, BLE_UUIDS.SVC_STATUS, BLE_UUIDS.STATUS.LAST_SYNC);
-        lastSync = base64ToUtf8(ls);
+        status.lastSync = base64ToUtf8(ls);
+        await sleep(100);
         const sl = await safeReadCharacteristic(device.id, BLE_UUIDS.SVC_STATUS, BLE_UUIDS.STATUS.SENSORS_LIST);
-        sensorsList = base64ToUtf8(sl);
+        status.sensorsList = base64ToUtf8(sl);
       }
 
       const rtcHardwareOK = parseBooleanString(rtcSt);
@@ -257,43 +259,28 @@ export const BleProvider = ({ children }: { children: React.ReactNode }) => {
       if (!rtcHardwareOK) rtcState = "ERROR";
       else if (rtcSync) {
         const rtcString = base64ToUtf8(rtcSync);
-        if (rtcString.length < 5 || rtcString.includes("1970")) rtcState = "ERROR";
+        if (rtcString.length < 5 || rtcString.includes("1970")) rtcState = "WARNING";
       }
 
-      return {
-        sdEnabled: parseBooleanString(sdEn),
-        loraEnabled: parseBooleanString(loraEn),
-        sdStatus: parseBooleanString(sdSt),
-        loraStatus: parseBooleanString(loraSt),
-        rtcStatus: rtcState,
-        wifiStatus,
-        lastSync,
-        syncStatus: "IDLE",
-        sensorsList,
-      };
+      status.sdEnabled = parseBooleanString(sdEn);
+      status.loraEnabled = parseBooleanString(loraEn);
+      status.sdStatus = parseBooleanString(sdSt);
+      status.loraStatus = parseBooleanString(loraSt);
+      status.rtcStatus = rtcState;
+      status.syncStatus = "IDLE";
+      return status;
     } catch {
       return INITIAL_DIAGNOSIS_STATUS;
     }
   }, [safeReadCharacteristic]);
 
-  // =================================================================
-  // BLOQUE DE ACCIONES (ORDEN IMPORTANTE)
-  // =================================================================
-
   const stopMonitoringData = useCallback((forceNativeRemove: boolean = true) => {
     if (activeSubscriptions.current.length === 0) return;
-    
-    // ANTI-CRASH: Solo llamamos a .remove() si forceNativeRemove es TRUE.
-    // Al desconectar, pasaremos FALSE para que la librería nativa limpie sola.
     if (forceNativeRemove) {
-      logTrace("MONITOR", "Limpiando suscripciones nativas...");
       activeSubscriptions.current.forEach((sub) => {
         try { if (sub) sub.remove(); } catch {}
       });
-    } else {
-      logTrace("MONITOR", "Limpiando lista JS (Native auto-cleanup)...");
     }
-    
     activeSubscriptions.current = [];
   }, []);
 
@@ -309,7 +296,6 @@ export const BleProvider = ({ children }: { children: React.ReactNode }) => {
     logTrace("SCAN", "Iniciando escaneo...");
     setScannedDevices([]);
     updateScanningState(true);
-    
     manager.startDeviceScan(null, { scanMode: ScanMode.LowLatency }, (error, device) => {
       if (error) { updateScanningState(false); return; }
       if (device?.name?.includes("SEN-")) {
@@ -323,18 +309,11 @@ export const BleProvider = ({ children }: { children: React.ReactNode }) => {
     if (connectedDevice) {
       setIsBusy(true);
       isDisconnectingRef.current = true;
-      
-      // CRASH FIX: Pasamos FALSE para NO llamar a .remove() explícitamente.
-      // Dejamos que cancelConnection mate todo limpiamente.
       stopMonitoringData(false);
-      
       try { 
           const isAlive = await manager.isDeviceConnected(connectedDevice.id).catch(() => false);
-          if (isAlive) {
-             await connectedDevice.cancelConnection(); 
-          }
+          if (isAlive) await connectedDevice.cancelConnection(); 
       } catch {}
-      
       setConnectedDevice(null);
       setSensorInfo(null);
       setSensorData({});
@@ -345,7 +324,6 @@ export const BleProvider = ({ children }: { children: React.ReactNode }) => {
   }, [connectedDevice, stopMonitoringData, manager]);
 
   const startMonitoringData = useCallback(async (device: Device, category: DeviceCategory) => {
-    // Al iniciar, sí forzamos limpieza previa por seguridad (aquí la conexión está viva)
     stopMonitoringData(true);
     logTrace("MONITOR", `Iniciando monitoreo (${category})...`);
 
@@ -356,22 +334,11 @@ export const BleProvider = ({ children }: { children: React.ReactNode }) => {
         const batChar = await device.readCharacteristicForService(UUID_BAT_SVC, UUID_BAT_CHAR).catch(() => null);
         if (batChar?.value) {
             const val = decodeBinaryByte(batChar.value);
-            console.log(`[BAT-INIT] ✅ Lectura forzada exitosa: ${val}%`);
             setSensorData(prev => ({ ...prev, battery: val }));
         }
-    } catch {
-        console.log("[BAT-INIT] Falló lectura inicial");
-    }
+    } catch {}
 
-    interface CharDef {
-        service: string;
-        char: string;
-        updateKey?: keyof SensorData;
-        isBinary: boolean;
-        isStatus?: boolean; 
-    }
-
-    const charsToMonitor: CharDef[] = [
+    const charsToMonitor = [
       { service: UUID_BAT_SVC, char: UUID_BAT_CHAR, updateKey: "battery", isBinary: true },
     ];
 
@@ -389,29 +356,18 @@ export const BleProvider = ({ children }: { children: React.ReactNode }) => {
       );
     }
 
-    charsToMonitor.forEach(({ service, char, updateKey, isBinary, isStatus }) => {
+    charsToMonitor.forEach(({ service, char, updateKey, isBinary }: any) => {
       const sub = device.monitorCharacteristicForService(service, char, (error, characteristic) => {
-        if (error) return;
-        if (!characteristic?.value) return;
-
-        if (isStatus && category === "GATEWAY") {
-           const valStr = base64ToUtf8(characteristic.value);
-           if (char === BLE_UUIDS.STATUS.WIFI_STATUS) setDiagnosisStatus(p => ({...p, wifiStatus: valStr}));
-           else if (char === BLE_UUIDS.STATUS.SYNC_STATUS) setDiagnosisStatus(p => ({...p, syncStatus: valStr}));
-           else if (char === BLE_UUIDS.STATUS.SENSORS_LIST) setDiagnosisStatus(p => ({...p, sensorsList: valStr}));
-        } else if (updateKey) {
-          let value = isBinary ? decodeBinaryByte(characteristic.value) : decodeNumericString(characteristic.value);
-          if (!isNaN(value)) {
-            setSensorData(prev => ({ ...prev, [updateKey as string]: value }));
-          }
-        }
+        if (error || !characteristic?.value) return;
+        const value = isBinary ? decodeBinaryByte(characteristic.value) : decodeNumericString(characteristic.value);
+        if (!isNaN(value)) setSensorData(prev => ({ ...prev, [updateKey]: value }));
       });
       activeSubscriptions.current.push(sub);
     });
   }, [stopMonitoringData]);
 
-  // --- CONNECT ---
   const connectToDevice = useCallback(async (device: Device) => {
+    if (isBusy) return;
     setIsBusy(true);
     logTrace("CONNECT", `Conectando a ${device.id}...`);
 
@@ -422,79 +378,51 @@ export const BleProvider = ({ children }: { children: React.ReactNode }) => {
         await sleep(500);
       }
       isDisconnectingRef.current = false;
-      setSensorData({});
 
-      const performConnection = async () => {
-        logTrace("CONNECT", "Conectando nativo...");
-        const connected = await device.connect({ autoConnect: false });
-        logTrace("CONNECT", "Descubriendo servicios...");
-        await connected.discoverAllServicesAndCharacteristics();
-        
-        logTrace("CONNECT", "Obteniendo Info...");
-        const info = await getDeviceInfo(connected);
-        
-        logTrace("CONNECT", "Obteniendo Diagnóstico...");
-        const diagnosis = await readDiagnosisAndConfig(connected, info.category);
-        setDiagnosisStatus(diagnosis);
+      logTrace("CONNECT", "Iniciando...");
+      const connected = await device.connect({ autoConnect: false, timeout: 15000 });
+      
+      if (Platform.OS === 'android') {
+          logTrace("CONNECT", "Negociando MTU...");
+          await connected.requestMTU(512).catch(() => {});
+      }
 
-        logTrace("CONNECT", "Iniciando Monitoreo...");
-        await startMonitoringData(connected, info.category);
-        return { connected, info };
-      };
+      logTrace("CONNECT", "Discovery...");
+      await connected.discoverAllServicesAndCharacteristics();
+      
+      const info = await getDeviceInfo(connected);
+      logTrace("CONNECT", "Diagnosis...");
+      const diagnosis = await readDiagnosisAndConfig(connected, info.category);
+      setDiagnosisStatus(diagnosis);
 
-      const JS_TIMEOUT_ERROR = "JS_TIMEOUT_CRITICAL";
-      const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error(JS_TIMEOUT_ERROR)), CONNECTION_TIMEOUT_MS));
+      logTrace("CONNECT", "Monitoreo...");
+      await startMonitoringData(connected, info.category);
 
-      // @ts-ignore
-      const result: { connected: Device; info: SensorInfo } = await Promise.race([performConnection(), timeoutPromise]);
+      setConnectedDevice(connected);
+      setSensorInfo(info);
 
-      setConnectedDevice(result.connected);
-      setSensorInfo(result.info);
-
-      const discSub = result.connected.onDisconnected((error, disconnectedDevice) => {
-        if (isDisconnectingRef.current) { discSub.remove(); return; }
-        logTrace("DISCONNECT", "INESPERADA");
-        // FIX CRITICO: En desconexión inesperada, también usamos false para evitar crash
-        stopMonitoringData(false); 
+      const discSub = connected.onDisconnected(() => {
+        logTrace("DISCONNECT", "Inesperada");
+        stopMonitoringData(false);
         setConnectedDevice(null);
         setDiagnosisStatus(INITIAL_DIAGNOSIS_STATUS);
         discSub.remove();
       });
 
-      logTrace("CONNECT", "¡Conexión Exitosa!");
-
+      logTrace("CONNECT", "✅ Exitoso");
     } catch (error: any) {
-      logTrace("CONNECT_ERROR_CATCH", error.message || "Unknown");
-      
-      // FIX CRITICO: Si falló la conexión, limpiamos JS pero NO intentamos cancelar suscripciones nativas
-      stopMonitoringData(false); 
-
-      try {
-        if (device && device.id) {
-            const isConnected = await manager.isDeviceConnected(device.id).catch(() => false);
-            if (isConnected) {
-                logTrace("CONNECT", "Cancelando conexión pendiente...");
-                await manager.cancelDeviceConnection(device.id).catch(() => {});
-            }
-        }
-      } catch {
-        logTrace("CONNECT", "Error en limpieza segura (ignorable).");
-      }
-
+      logTrace("CONNECT_ERR", error.message || "Error");
+      stopMonitoringData(false);
+      await manager.cancelDeviceConnection(device.id).catch(() => {});
       setConnectedDevice(null);
-      setSensorInfo(null);
-      setDiagnosisStatus(INITIAL_DIAGNOSIS_STATUS);
       throw error;
     } finally {
       setIsBusy(false);
     }
-  }, [stopScan, connectedDevice, disconnectDevice, getDeviceInfo, readDiagnosisAndConfig, startMonitoringData, stopMonitoringData, manager]);
+  }, [stopScan, connectedDevice, isBusy, disconnectDevice, getDeviceInfo, readDiagnosisAndConfig, startMonitoringData, stopMonitoringData, manager]);
 
   useEffect(() => {
-    return () => { 
-        logTrace("CLEANUP", "Deteniendo escaneo...");
-        manager.stopDeviceScan(); 
-    };
+    return () => { manager.stopDeviceScan(); };
   }, [manager]);
 
   return (

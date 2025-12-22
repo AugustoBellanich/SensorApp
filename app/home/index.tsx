@@ -24,12 +24,12 @@ import {
 import { SensorEntity } from "../../database/types";
 import { syncService } from "../../services/syncService";
 
-// --- VARIABLE DE CONTROL DE SESIÓN ---
-// Al estar fuera del componente, mantiene su valor aunque navegues entre pantallas.
-// Solo se reinicia si cierras la app completamente.
+// --- SUPABASE ---
+import { supabase } from "../../lib/supabase";
+
+// Variable global para controlar la sincronización por sesión de app
 let isSessionSynced = false;
 
-// Tipos de Sensores Soportados
 type SensorModelType = "B01" | "C01" | "N01" | "UNKNOWN";
 
 interface SensorItem {
@@ -41,14 +41,8 @@ interface SensorItem {
   device?: Device;
 }
 
-// --- OVERLAY ---
-const LoadingOverlay = ({
-  visible,
-  message,
-}: {
-  visible: boolean;
-  message: string;
-}) => {
+// --- SUBCOMPONENTE: OVERLAY DE CARGA ---
+const LoadingOverlay = ({ visible, message }: { visible: boolean; message: string }) => {
   if (!visible) return null;
   return (
     <View style={styles.loadingOverlay}>
@@ -72,7 +66,6 @@ export default function HomeScreen() {
     scannedDevices,
     connectToDevice,
     connectedDevice,
-    disconnectDevice,
     clearScannedDevices,
   } = useBle();
 
@@ -81,13 +74,32 @@ export default function HomeScreen() {
   const [isSyncing, setIsSyncing] = useState(false);
   const [onboardingStatus, setOnboardingStatus] = useState<string | null>(null);
 
-  // --- DETECCIÓN INTELIGENTE DE TIPO ---
-  const getSensorType = (id: string): SensorModelType => {
-    const upperId = id.toUpperCase();
-    if (upperId.includes("B01") || upperId.includes("A01")) return "B01";
-    if (upperId.includes("C01")) return "C01";
-    if (upperId.includes("N01") || upperId.includes("N02")) return "N01";
-    return "UNKNOWN";
+  // --- ACCIÓN: CERRAR SESIÓN ---
+  const handleLogout = () => {
+    Alert.alert(
+      "Cerrar Sesión",
+      "¿Estás seguro de que quieres salir?",
+      [
+        { text: "Cancelar", style: "cancel" },
+        {
+          text: "Salir",
+          style: "destructive",
+          onPress: async () => {
+            try {
+              setIsSyncing(true);
+              await supabase.auth.signOut();
+              isSessionSynced = false;
+              // Si tu pantalla de login no es "/", cambia esto por la ruta correcta
+              router.replace("/"); 
+            } catch {
+              Alert.alert("Error", "No se pudo cerrar la sesión.");
+            } finally {
+              setIsSyncing(false);
+            }
+          },
+        },
+      ]
+    );
   };
 
   const loadSensorsFromDB = async () => {
@@ -100,28 +112,17 @@ export default function HomeScreen() {
     }
   };
 
-  // --- 1. SINCRONIZACIÓN INTELIGENTE (SOLO UNA VEZ POR SESIÓN) ---
+  // --- 1. SINCRONIZACIÓN INICIAL ---
   useEffect(() => {
     const initSync = async () => {
-      // Si ya sincronizamos en esta sesión, NO hacemos nada pesado.
-      // Solo cargamos los datos locales y salimos.
       if (isSessionSynced) {
-        console.log("✅ Sesión ya sincronizada. Cargando datos locales...");
         await loadSensorsFromDB();
         return;
       }
-
-      // Si es la primera vez que abrimos la app...
       setIsSyncing(true);
       try {
-        console.log(
-          "🔄 Iniciando Sincronización Inicial (Push + Pull + Limpieza)..."
-        );
         await syncService.syncAll();
-
-        // Marcamos que ya se hizo, para que no se repita al volver al Home
         isSessionSynced = true;
-
         await loadSensorsFromDB();
       } catch (e) {
         console.log("Sync warning:", e);
@@ -129,94 +130,64 @@ export default function HomeScreen() {
         setIsSyncing(false);
       }
     };
-
     initSync();
   }, []);
 
-  // --- 2. GESTIÓN DEL FOCO (INICIA ESCANEO + RECARGA LOCAL) ---
-  // Cada vez que miras la pantalla, refresca la lista LOCAL, pero no llama a la nube.
+  // --- 2. GESTIÓN DEL ESCANEO AL ENTRAR ---
   useFocusEffect(
     useCallback(() => {
       let timeoutId: any;
-
       const onFocus = async () => {
-        if (connectedDevice && !isBusy) {
-          // await disconnectDevice();
-        }
-
         clearScannedDevices();
         setDisplayList([]);
         await loadSensorsFromDB();
-
         timeoutId = setTimeout(() => {
           if (!connectedDevice && !isBusy) {
             startScan();
           }
         }, 500);
       };
-
       onFocus();
-
       return () => {
         clearTimeout(timeoutId);
         stopScan();
       };
-    }, [connectedDevice, isBusy])
+      // CORRECCIÓN: Agregadas dependencias faltantes para evitar error de lint
+    }, [connectedDevice, isBusy, clearScannedDevices, startScan, stopScan])
   );
 
-  // --- 3. MERGE: BLE + DB (MEJORADO) ---
-  // Este bloque reemplaza al anterior useEffect número 3
+  // --- 3. PROCESAMIENTO DE LISTA (BLE + DB) ---
   useEffect(() => {
     const combined: SensorItem[] = scannedDevices.map((device) => {
-      // 1. Obtener nombre crudo (lo que viene del aire)
       const rawName = device.name || device.id;
-
-      // 2. Limpiar prefijo "SEN-" (sin importar mayúsculas/minúsculas)
-      // Ejemplo: "SEN-N01-AB123" se convierte en "N01-AB123"
       const cleanId = rawName.replace(/^SEN-/i, "").trim();
+      const known = savedSensors.find((db) => db.id === cleanId || db.id === rawName);
 
-      // 3. Buscar si ya lo tenemos guardado en la BD
-      const known = savedSensors.find(
-        (db) => db.id === cleanId || db.id === rawName
-      );
-
-      // 4. DETECTAR TIPO AL VUELO (Para que el icono salga bien en la lista)
       let detectedType: SensorModelType = "UNKNOWN";
-
       if (known) {
-        // Si ya está guardado, confiamos en la base de datos
         detectedType = known.type as SensorModelType;
       } else {
-        // Si es nuevo, adivinamos por el nombre limpio
         const upperId = cleanId.toUpperCase();
-        if (upperId.includes("N01") || upperId.includes("N02"))
-          detectedType = "N01";
+        if (upperId.includes("N01") || upperId.includes("N02")) detectedType = "N01";
         else if (upperId.includes("C01")) detectedType = "C01";
-        else if (upperId.includes("B01") || upperId.includes("A01"))
-          detectedType = "B01";
+        else if (upperId.includes("B01") || upperId.includes("A01")) detectedType = "B01";
       }
 
       return {
-        id: rawName, // Importante: Mantenemos el ID original para poder conectarnos
-
-        // VISUAL: Si tiene Alias personal úsalo, si no, muestra el ID LIMPIO (sin SEN-)
+        id: rawName,
         name: known?.alias || cleanId,
-
         rssi: device.rssi,
         isSaved: !!known,
-        type: detectedType, // Usamos el tipo corregido para que salga el icono verde/azul/etc
+        type: detectedType,
         device: device,
       };
     });
 
-    // 5. Agregar los sensores guardados que NO están cerca (Historial Offline)
     savedSensors.forEach((savedSensor) => {
-      // Verificamos si ya está en la lista combinada (comparando ID limpio)
       const isAlreadyListed = combined.find((c) => {
         const cClean = (c.device?.name || c.id).replace(/^SEN-/i, "").trim();
         return cClean === savedSensor.id;
       });
-
       if (!isAlreadyListed) {
         combined.push({
           id: savedSensor.id,
@@ -228,186 +199,80 @@ export default function HomeScreen() {
       }
     });
 
-    // 6. Ordenar: Primero los que tienen más señal, al final los offline
-    combined.sort((a, b) => {
-      const rssiA = a.rssi ?? -999;
-      const rssiB = b.rssi ?? -999;
-      return rssiB - rssiA;
-    });
-
+    combined.sort((a, b) => (b.rssi ?? -999) - (a.rssi ?? -999));
     setDisplayList(combined);
   }, [scannedDevices, savedSensors]);
 
-  // --- 4. ACCIÓN PRINCIPAL: ONBOARDING ---
+  // --- 4. ACCIÓN: CONECTAR O ENTRAR A DASHBOARD ---
   const handleConnectAction = async (item: SensorItem) => {
     if (isBusy || isSyncing) return;
-
     if (item.device) {
       try {
-        setOnboardingStatus("Conectando BLE...");
+        setOnboardingStatus("Conectando...");
         await connectToDevice(item.device);
-
         const rawId = item.device.name || item.id;
         const cleanId = rawId.replace("SEN-", "");
-
-        let finalType = item.type;
-        if (finalType === "UNKNOWN") {
-          if (cleanId.includes("N01")) finalType = "N01";
-          else if (cleanId.includes("C01")) finalType = "C01";
-          else finalType = "B01"; // Solo por defecto si no tiene nada en el nombre
-        }
-
-        setOnboardingStatus("Verificando registro...");
-        // Buscamos en nuestra tabla estructurada
+        
         const existingLocal = await getSensorById(cleanId);
-
         if (!existingLocal) {
-          setOnboardingStatus("Registrando sensor...");
-          // Si no existe, lo creamos con valores BASE.
-          // Las profundidades y calibraciones vendrán de la tabla 'device_electrodes'
-          const now = new Date().toISOString();
+          // --- CORRECCIÓN DE TIPO ---
+          // Si el tipo es UNKNOWN, le asignamos B01 por defecto para que la DB lo acepte
+          const validatedType: "B01" | "C01" | "N01" = 
+            item.type === "UNKNOWN" ? "B01" : item.type;
 
-          await saveSensor(
-            {
-              id: cleanId,
-              alias: item.name,
-              type: finalType,
-              location: "Sin asignar",
-              activity: "Nuevo",
-              config_json: "{}",
-              is_synced: 0,
-              updated_at: now,
-            },
-            false
-          );
-
+          await saveSensor({
+            id: cleanId, 
+            alias: item.name, 
+            type: validatedType, // Ahora el tipo coincide con SensorEntity
+            location: "Sin asignar", 
+            activity: "Nuevo",
+            config_json: "{}", 
+            is_synced: 0, 
+            updated_at: new Date().toISOString(),
+          }, false);
+          
           await loadSensorsFromDB();
         }
-
+        
         setOnboardingStatus(null);
-
-        // Navegación con delay para asegurar que el contexto BLE guardó el device
         setTimeout(() => {
+          // Usamos item.type para decidir la ruta, o validatedType
           const route = item.type === "N01" ? "gateway" : "sensor";
           router.push(`/${route}/${cleanId}/dashboard`);
         }, 200);
-      } catch (error: any) {
+      } catch {
         setOnboardingStatus(null);
-        console.error("[DEBUG] Error en handleConnectAction:", error);
-
-        // Si fue un timeout o error de conexión, el BleContext ya limpió todo.
-        // Solo avisamos al usuario.
-        if (error.message === "JS_TIMEOUT_CRITICAL") {
-          Alert.alert(
-            "Tiempo agotado",
-            "El sensor tardó demasiado en responder. Asegúrate de que no esté en modo sleep."
-          );
-        } else {
-          Alert.alert(
-            "Error de Conexión",
-            "No se pudo vincular con el sensor."
-          );
-        }
+        Alert.alert("Error", "No se pudo conectar.");
       }
     } else if (item.isSaved) {
-      // Navegación Offline (sin conexión BLE)
       const route = item.type === "N01" ? "gateway" : "sensor";
       router.push(`/${route}/${item.id}/dashboard`);
     }
   };
 
   const renderItem = ({ item }: { item: SensorItem }) => {
-    const type = item.type;
+    const meta = {
+      B01: { icon: "sprout", bg: "#e3f2fd", color: Colors.primary, label: "Suelo (B01)" },
+      C01: { icon: "weather-partly-cloudy", bg: "#fff3e0", color: Colors.secondary, label: "Clima (C01)" },
+      N01: { icon: "router-wireless", bg: "#e8f5e9", color: "#2e7d32", label: "Gateway (N01)" },
+      UNKNOWN: { icon: "chip-outline", bg: "#f3f4f6", color: "#666", label: "Desconocido" },
+    }[item.type] || { icon: "chip-outline", bg: "#f3f4f6", color: "#666", label: "Desconocido" };
+
     const isOffline = item.rssi === null;
-    const typeMap: Record<
-      string,
-      { icon: string; bg: string; iconColor: string; label: string }
-    > = {
-      B01: {
-        icon: "sprout",
-        bg: "#e3f2fd",
-        iconColor: Colors.primary,
-        label: "Sensor Suelo (B01)",
-      },
-      C01: {
-        icon: "weather-partly-cloudy",
-        bg: "#fff3e0",
-        iconColor: Colors.secondary,
-        label: "Estación Climática (C01)",
-      },
-      N01: {
-        icon: "router-wireless",
-        bg: "#e8f5e9",
-        iconColor: "#2e7d32",
-        label: "Gateway LoRa (N01)",
-      },
-      UNKNOWN: {
-        icon: "chip-outline",
-        bg: "#f3f4f6",
-        iconColor: Colors.textSecondary,
-        label: "Dispositivo Desconocido",
-      },
-    };
-    const meta = typeMap[type] || typeMap.UNKNOWN;
-    let signalColor = Colors.textSecondary;
-    if (!isOffline && item.rssi != null) {
-      if (item.rssi > -70) signalColor = Colors.success;
-      else if (item.rssi > -85) signalColor = Colors.warning;
-      else signalColor = Colors.error;
-    }
-    const disabled = (!item.isSaved && isOffline) || isBusy || isSyncing;
 
     return (
-      <TouchableOpacity
-        style={[styles.card, isOffline && styles.cardOffline]}
+      <TouchableOpacity 
+        style={[styles.card, isOffline && styles.cardOffline]} 
         onPress={() => handleConnectAction(item)}
-        disabled={disabled}
       >
         <View style={[styles.iconBox, { backgroundColor: meta.bg }]}>
-          <MaterialCommunityIcons
-            name={meta.icon as any}
-            size={24}
-            color={meta.iconColor}
-            style={{ opacity: isOffline ? 0.5 : 1 }}
-          />
+          <MaterialCommunityIcons name={meta.icon as any} size={24} color={meta.color} />
         </View>
         <View style={styles.cardContent}>
-          <Text style={styles.alias}>
-            {item.name}
-            {item.isSaved && (
-              <MaterialCommunityIcons
-                name="bookmark"
-                size={14}
-                color={Colors.primary}
-                style={{ marginLeft: 4 }}
-              />
-            )}
-          </Text>
+          <Text style={styles.alias}>{item.name} {item.isSaved && <MaterialCommunityIcons name="bookmark" size={14} color={Colors.primary} />}</Text>
           <Text style={styles.subId}>{item.id}</Text>
-          <Text
-            style={{ fontSize: 12, color: Colors.textSecondary, marginTop: 2 }}
-          >
-            {meta.label}
-          </Text>
           <View style={styles.signalRow}>
-            {isOffline ? (
-              <Text style={styles.offlineText}>
-                • Sin señal (Historial Offline)
-              </Text>
-            ) : (
-              <>
-                <MaterialCommunityIcons
-                  name="signal"
-                  size={14}
-                  color={signalColor}
-                />
-                <Text style={[styles.rssiText, { color: signalColor }]}>
-                  {" "}
-                  {item.rssi} dBm
-                </Text>
-                {!item.isSaved && <Text style={styles.newTag}>• NUEVO</Text>}
-              </>
-            )}
+            {isOffline ? <Text style={styles.offlineText}>Offline</Text> : <Text style={styles.rssiText}>{item.rssi} dBm</Text>}
           </View>
         </View>
         <MaterialCommunityIcons name="chevron-right" size={24} color="#ccc" />
@@ -420,70 +285,28 @@ export default function HomeScreen() {
       <View style={styles.header}>
         <View>
           <Text style={styles.appTitle}>MIS SENSORES</Text>
-          <View style={{ flexDirection: "row", alignItems: "center" }}>
-            <Text style={styles.headerSub}>
-              {isScanning ? "Buscando dispositivos..." : "Escaneo pausado"}
-            </Text>
-            {isSyncing && (
-              <ActivityIndicator
-                size="small"
-                color={Colors.primary}
-                style={{ marginLeft: 10 }}
-              />
-            )}
-          </View>
+          <Text style={styles.headerSub}>{isScanning ? "Buscando..." : "Pausado"}</Text>
         </View>
-        <TouchableOpacity
-          style={[styles.scanButton, isScanning && styles.scanningBtn]}
-          onPress={() => {
-            if (isBusy || isSyncing) return;
-            if (isScanning) stopScan();
-            else {
-              clearScannedDevices();
-              startScan();
-            }
-          }}
-        >
-          {isScanning ? (
-            <ActivityIndicator color="#fff" size="small" />
-          ) : (
-            <MaterialCommunityIcons name="bluetooth" size={24} color="#fff" />
-          )}
-        </TouchableOpacity>
+        <View style={styles.headerActions}>
+          <TouchableOpacity style={styles.logoutButton} onPress={handleLogout}>
+            <MaterialCommunityIcons name="logout-variant" size={22} color="#666" />
+          </TouchableOpacity>
+          <TouchableOpacity 
+            style={[styles.scanButton, isScanning && styles.scanningBtn]} 
+            onPress={() => isScanning ? stopScan() : startScan()}
+          >
+            {isScanning ? <ActivityIndicator color="#fff" size="small" /> : <MaterialCommunityIcons name="bluetooth" size={24} color="#fff" />}
+          </TouchableOpacity>
+        </View>
       </View>
 
       <FlatList
         data={displayList}
         keyExtractor={(item) => item.id}
         renderItem={renderItem}
-        contentContainerStyle={{ padding: 16, paddingBottom: 100 }}
-        showsVerticalScrollIndicator={false}
-        ListEmptyComponent={
-          <View style={styles.emptyState}>
-            <MaterialCommunityIcons
-              name="bluetooth-off"
-              size={48}
-              color="#ccc"
-            />
-            <Text style={styles.emptyText}>
-              {isScanning
-                ? "Esperando sensores..."
-                : "No se encontraron sensores cercanos."}
-            </Text>
-            {!isScanning && savedSensors.length === 0 && (
-              <Text style={{ fontSize: 12, color: "#aaa", marginTop: 5 }}>
-                Pulsa el botón Bluetooth para buscar
-              </Text>
-            )}
-          </View>
-        }
+        contentContainerStyle={{ padding: 16 }}
       />
-      <LoadingOverlay
-        visible={isBusy || isSyncing || !!onboardingStatus}
-        message={
-          onboardingStatus || (isSyncing ? "Sincronizando..." : "Conectando...")
-        }
-      />
+      <LoadingOverlay visible={isBusy || isSyncing || !!onboardingStatus} message={onboardingStatus || "Cargando..."} />
     </View>
   );
 }
@@ -491,98 +314,26 @@ export default function HomeScreen() {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: "#f8f9fa" },
   header: {
-    paddingHorizontal: 24,
-    paddingVertical: 20,
-    backgroundColor: "#fff",
-    borderBottomLeftRadius: 24,
-    borderBottomRightRadius: 24,
-    elevation: 4,
-    shadowColor: "#000",
-    shadowOpacity: 0.05,
-    shadowRadius: 10,
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
+    paddingHorizontal: 24, paddingVertical: 20, backgroundColor: "#fff",
+    borderBottomLeftRadius: 24, borderBottomRightRadius: 24,
+    elevation: 4, flexDirection: "row", justifyContent: "space-between", alignItems: "center",
   },
+  headerActions: { flexDirection: 'row', alignItems: 'center', gap: 15 },
+  logoutButton: { padding: 8 },
   appTitle: { fontSize: 24, fontWeight: "bold", color: Colors.textPrimary },
-  headerSub: { fontSize: 14, color: Colors.textSecondary, marginTop: 4 },
-  scanButton: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
-    backgroundColor: Colors.primary,
-    justifyContent: "center",
-    alignItems: "center",
-    elevation: 2,
-  },
-  scanningBtn: { backgroundColor: Colors.textSecondary },
-  emptyState: { alignItems: "center", marginTop: 60 },
-  emptyText: { color: "#888", marginTop: 10 },
-  card: {
-    flexDirection: "row",
-    alignItems: "center",
-    backgroundColor: "#fff",
-    padding: 16,
-    borderRadius: 16,
-    marginBottom: 12,
-    elevation: 2,
-    borderWidth: 1,
-    borderColor: "#eee",
-  },
-  cardOffline: { opacity: 0.7, backgroundColor: "#f9f9f9" },
-  iconBox: {
-    width: 48,
-    height: 48,
-    borderRadius: 12,
-    justifyContent: "center",
-    alignItems: "center",
-    marginRight: 16,
-  },
+  headerSub: { fontSize: 14, color: Colors.textSecondary },
+  scanButton: { width: 48, height: 48, borderRadius: 24, backgroundColor: Colors.primary, justifyContent: "center", alignItems: "center" },
+  scanningBtn: { backgroundColor: "#999" },
+  card: { flexDirection: "row", alignItems: "center", backgroundColor: "#fff", padding: 16, borderRadius: 16, marginBottom: 12, elevation: 2 },
+  cardOffline: { opacity: 0.6 },
+  iconBox: { width: 48, height: 48, borderRadius: 12, justifyContent: "center", alignItems: "center", marginRight: 16 },
   cardContent: { flex: 1 },
   alias: { fontSize: 16, fontWeight: "bold", color: Colors.textPrimary },
-  subId: {
-    fontSize: 12,
-    color: Colors.textSecondary,
-    fontFamily: "monospace",
-    marginVertical: 2,
-  },
+  subId: { fontSize: 12, color: Colors.textSecondary, fontFamily: "monospace" },
   signalRow: { flexDirection: "row", alignItems: "center", marginTop: 4 },
-  rssiText: { fontSize: 12, fontWeight: "bold", marginLeft: 4 },
-  offlineText: {
-    fontSize: 12,
-    color: Colors.textSecondary,
-    fontStyle: "italic",
-  },
-  newTag: {
-    fontSize: 10,
-    color: Colors.primary,
-    fontWeight: "bold",
-    marginLeft: 6,
-  },
-  loadingOverlay: {
-    position: "absolute",
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    backgroundColor: "rgba(0,0,0,0.5)",
-    justifyContent: "center",
-    alignItems: "center",
-    zIndex: 999,
-  },
-  loadingBox: {
-    width: 220,
-    padding: 24,
-    backgroundColor: "#fff",
-    borderRadius: 16,
-    alignItems: "center",
-    elevation: 10,
-  },
-  loadingText: {
-    marginTop: 12,
-    fontSize: 16,
-    fontWeight: "bold",
-    color: Colors.textPrimary,
-    textAlign: "center",
-  },
+  rssiText: { fontSize: 12, fontWeight: "bold", color: Colors.success },
+  offlineText: { fontSize: 12, color: "#999", fontStyle: "italic" },
+  loadingOverlay: { position: "absolute", top: 0, left: 0, right: 0, bottom: 0, backgroundColor: "rgba(0,0,0,0.5)", justifyContent: "center", alignItems: "center", zIndex: 999 },
+  loadingBox: { width: 200, padding: 20, backgroundColor: "#fff", borderRadius: 16, alignItems: "center" },
+  loadingText: { marginTop: 12, fontWeight: "bold", textAlign: "center" },
 });
