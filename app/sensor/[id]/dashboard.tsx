@@ -20,8 +20,8 @@ import SensorInfoBar from "../../../components/sensor/SensorInfoBar";
 
 // --- LOGICA Y DB ---
 import { getElectrodesBySensor } from "../../../database/ElectrodeRepository";
-import { getLastReadingB01, getLastReadingC01 } from "../../../database/ReadingsRepository";
 import { getSensorById } from "../../../database/SensorRepository";
+// ELIMINADO: getLastReadingB01, getLastReadingC01 (Ya no leemos lecturas de SQLite)
 
 import {
   ElectrodeEntity,
@@ -29,7 +29,10 @@ import {
   SensorEntity,
 } from "../../../database/types";
 import { getBatteryColor, getBatteryIcon } from "../../../utils/batteryUtils";
-import { calculateMoistureFromSegments } from "../../../utils/calibration"; // Asegúrate que la importación sea correcta
+import { calculateMoistureFromSegments } from "../../../utils/calibration";
+
+// --- SUPABASE ---
+import { supabase } from "../../../lib/supabase"; // Asegúrate que esta ruta sea correcta
 
 export default function SensorDashboard() {
   const { id } = useLocalSearchParams();
@@ -42,7 +45,7 @@ export default function SensorDashboard() {
   const [dbSensor, setDbSensor] = useState<SensorEntity | null>(null);
   const [dbElectrodes, setDbElectrodes] = useState<ElectrodeEntity[]>([]);
   
-  // Estado para el último dato guardado (Offline)
+  // Estado para el último dato (Ahora vendrá de la Nube, no SQLite)
   const [lastReading, setLastReading] = useState<any>(null);
   const [loading, setLoading] = useState(true);
 
@@ -55,34 +58,46 @@ export default function SensorDashboard() {
         if (!sensorIdStr) return;
         
         try {
+          // 1. Configuración y Metadatos siempre locales (para tener alias, calibración, etc.)
           const sensor = await getSensorById(sensorIdStr);
           const electrodes = await getElectrodesBySensor(sensorIdStr);
           
-          // Determinar tipo (fallback al ID si sensor es null)
-          const typeToCheck = sensor?.type || (sensorIdStr.includes("B01") ? "B01" : "C01");
-          
-          console.log(`[DASHBOARD] Buscando datos locales para ${sensorIdStr} (Tipo: ${typeToCheck})`);
-
-          let lastData = null;
-          if (typeToCheck === 'B01') {
-             lastData = await getLastReadingB01(sensorIdStr);
-          } else {
-             lastData = await getLastReadingC01(sensorIdStr);
-          }
-
           if (isActive) {
             setDbSensor(sensor);
             setDbElectrodes(electrodes);
-            setLastReading(lastData);
-            
-            if (lastData) {
-                console.log(`[DASHBOARD] ✅ Dato encontrado: ${lastData.timestamp}`);
-            } else {
-                console.log(`[DASHBOARD] ⚠️ SQLite vacío para este sensor.`);
-            }
-            
-            setLoading(false);
           }
+
+          // 2. Si NO estamos conectados por Bluetooth, intentamos bajar el último dato de SUPABASE
+          if (!connectedDevice) {
+              const typeToCheck = sensor?.type || (sensorIdStr.includes("B01") ? "B01" : "C01");
+              const tableName = typeToCheck === 'B01' ? 'readings_b01' : 'readings_c01';
+
+              console.log(`[DASHBOARD] Desconectado. Buscando último dato en NUBE (${tableName})...`);
+
+              const { data, error } = await supabase
+                  .from(tableName)
+                  .select('*')
+                  .eq('sensor_id', sensorIdStr)
+                  .order('timestamp', { ascending: false })
+                  .limit(1)
+                  .single();
+
+              if (isActive) {
+                  if (data) {
+                      console.log(`[DASHBOARD] ✅ Dato nube encontrado: ${data.timestamp}`);
+                      setLastReading(data);
+                  } else {
+                      console.log(`[DASHBOARD] ☁️ Sin datos en la nube o error:`, error?.message);
+                      setLastReading(null); // Esto hará que se muestren las rayitas
+                  }
+              }
+          } else {
+              // Si estamos conectados, limpiamos lastReading para priorizar sensorData real
+              if (isActive) setLastReading(null);
+          }
+          
+          if (isActive) setLoading(false);
+
         } catch (error) {
           console.error("Error cargando dashboard", error);
           if (isActive) setLoading(false);
@@ -92,7 +107,7 @@ export default function SensorDashboard() {
       loadInitialData();
 
       return () => { isActive = false; };
-    }, [sensorIdStr])
+    }, [sensorIdStr, connectedDevice]) // Agregamos connectedDevice a dependencias para recargar si se desconecta
   );
 
   const modelType = dbSensor?.type || (sensorIdStr.includes("B01") ? "B01" : "C01");
@@ -121,7 +136,6 @@ export default function SensorDashboard() {
           const segments: LinearSegment[] = JSON.parse(electrode.equations_json);
           return calculateMoistureFromSegments(rawMv, segments);
       } catch {
-          // ESLint Fix: Quitamos la variable 'e' si no la usamos
           return 0;
       }
   };
@@ -173,14 +187,14 @@ export default function SensorDashboard() {
         isOffline={!isConnected}
       />
 
-      {/* BANNER OFFLINE / SIN DATOS */}
+      {/* BANNER OFFLINE / NUBE / SIN DATOS */}
       {!isConnected && (
           <View style={[styles.offlineBanner, !lastReading && { backgroundColor: '#999' }]}>
-              <MaterialCommunityIcons name={lastReading ? "history" : "database-off"} size={16} color="#fff" />
+              <MaterialCommunityIcons name={lastReading ? "cloud-check" : "cloud-off-outline"} size={16} color="#fff" />
               <Text style={styles.offlineText}>
                   {lastReading 
-                    ? `Viendo último dato: ${formatOfflineDate(lastReading.timestamp)}`
-                    : "Desconectado: Sin datos recientes en este teléfono."}
+                    ? `Dato Nube: ${formatOfflineDate(lastReading.timestamp)}`
+                    : "Desconectado: Sin datos en la Nube."}
               </Text>
           </View>
       )}
@@ -206,8 +220,10 @@ export default function SensorDashboard() {
               let rawMv: number | null = 0;
 
               if (isConnected) {
+                  // MODO ONLINE: Datos del BLE Context
                   rawMv = (sensorData[`moisture${idx}` as keyof SensorData] as number) || null;
               } else {
+                  // MODO OFFLINE: Datos de Supabase (o null si no hay)
                   if (lastReading) {
                       const key = `e${idx}_mv`; 
                       rawMv = lastReading[key]; 
@@ -232,16 +248,13 @@ export default function SensorDashboard() {
                   number={idx as 1 | 2 | 3}
                   depthCm={electrodeDb?.depth || 0}
                   
-                  // FIX 1: Pasamos 0 si es null para satisfacer TypeScript (number), pero isNoData mandará
+                  // Si es null, pasamos 0 pero isNoData se activa
                   voltageMv={rawMv ?? 0} 
                   
-                  // FIX 2: Pasamos 0 si es null (TypeScript error "number | null" -> "number")
                   volumetricMoisture={hv ?? 0}  
-                  
-                  // FIX 3: Pasamos undefined si es null (TypeScript error "number | null" -> "number | undefined")
                   gravimetricMoisture={hg ?? undefined}
                   
-                  // ESTO ES LO IMPORTANTE: Si rawMv es null, mostramos "--"
+                  // CRUCIAL: Esto mostrará las rayitas si rawMv es null (que sucede si no hay dato en nube)
                   isNoData={rawMv === null} 
                   
                   isCalibrated={isCalibrated}
@@ -319,7 +332,7 @@ const styles = StyleSheet.create({
   metricText: { fontWeight: "bold", fontSize: 15 },
   
   offlineBanner: {
-      backgroundColor: "#FF9800",
+      backgroundColor: "#42A5F5", // Azul Nube
       flexDirection: 'row',
       alignItems: 'center',
       justifyContent: 'center',
