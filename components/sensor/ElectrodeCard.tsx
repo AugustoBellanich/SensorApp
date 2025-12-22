@@ -6,14 +6,15 @@ import { Colors } from '../../constants/Colors';
 interface ElectrodeCardProps {
   number: 1 | 2 | 3;
   depthCm: number;
-  voltageMv: number;
-  volumetricMoisture: number; // Hv
-  gravimetricMoisture?: number; // Hg (NUEVO)
+  // Permitimos undefined para cuando la app inicia y aún no hay datos
+  voltageMv: number | undefined; 
+  volumetricMoisture: number | undefined; 
+  gravimetricMoisture?: number | undefined; 
   isCalibrated: boolean;
   texture: string;
   onCalibratePress: () => void;
   disabled?: boolean;
-  isNoData?: boolean; // <--- NUEVA PROPIEDAD
+  isNoData?: boolean;
 }
 
 export default function ElectrodeCard({
@@ -21,21 +22,24 @@ export default function ElectrodeCard({
   depthCm,
   voltageMv,
   volumetricMoisture,
-  gravimetricMoisture = 0, // Default 0
+  gravimetricMoisture = 0,
   isCalibrated,
   texture,
   onCalibratePress,
   disabled,
-  isNoData = false, // <--- Valor por defecto
+  isNoData = false,
 }: ElectrodeCardProps) {
   
+  // Lógica para detectar si realmente no hay dato (undefined o isNoData explícito)
+  const hasData = typeof volumetricMoisture === 'number' && !isNoData;
+
   // Colores dinámicos según humedad
-  const getMoistureColor = (val: number) => {
-    if (isNoData) return '#ccc'; // Color gris si no hay datos
+  const getMoistureColor = (val: number | undefined) => {
+    if (!hasData || val === undefined) return '#ccc'; 
     if (!isCalibrated) return '#999';
-    if (val < 10) return '#e21e08ff'; // Seco
-    if (val < 30) return '#eede04ff'; // Medio
-    return '#098a3fff'; // Húmedo
+    if (val < 10) return '#e21e08ff'; 
+    if (val < 30) return '#eede04ff'; 
+    return '#098a3fff'; 
   };
 
   return (
@@ -71,11 +75,11 @@ export default function ElectrodeCard({
             />
             <Text style={[
               styles.valueText, 
-              { color: isNoData ? '#ccc' : Colors.textPrimary, fontWeight: 'bold' }
+              { color: !hasData ? '#ccc' : Colors.textPrimary, fontWeight: 'bold' }
             ]}>
-              {/* LÓGICA DE DISPLAY: Si no hay datos -> "--", si no calibrado -> "RAW", si ok -> valor */}
-              {isNoData ? "--" : (isCalibrated ? volumetricMoisture.toFixed(1) : "--")}
-              {!isNoData && <Text style={styles.unitText}>%</Text>}
+              {/* LÓGICA DISPLAY SEGURA: ?. evita el crash si es undefined */}
+              {!hasData ? "--" : (isCalibrated ? volumetricMoisture?.toFixed(1) ?? "--" : "--")}
+              {hasData && <Text style={styles.unitText}>%</Text>}
             </Text>
           </View>
           
@@ -83,7 +87,7 @@ export default function ElectrodeCard({
           <View style={styles.secondaryRow}>
              <Text style={styles.secondaryLabel}>Gravimétrica (Hg): </Text>
              <Text style={styles.secondaryValue}>
-                {isNoData ? "--" : (isCalibrated ? gravimetricMoisture.toFixed(1) : "--")} %
+                {!hasData ? "--" : (isCalibrated ? gravimetricMoisture?.toFixed(1) ?? "--" : "--")} %
              </Text>
           </View>
         </View>
@@ -93,14 +97,14 @@ export default function ElectrodeCard({
           <View style={styles.techItem}>
             <Text style={styles.techLabel}>Voltaje</Text>
             <Text style={styles.techValue}>
-                {isNoData ? "--" : voltageMv.toFixed(0)} mV
+                {!hasData ? "--" : voltageMv?.toFixed(0) ?? "--"} mV
             </Text>
           </View>
           <View style={styles.techItem}>
             <Text style={styles.techLabel}>Suelo</Text>
             <Text style={styles.techValue} numberOfLines={1}>{texture}</Text>
           </View>
-          {!isCalibrated && !isNoData && (
+          {!isCalibrated && hasData && (
             <View style={styles.warningContainer}>
               <Text style={styles.warningText}>Sin Calibrar</Text>
             </View>

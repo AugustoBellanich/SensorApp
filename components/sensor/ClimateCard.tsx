@@ -6,7 +6,7 @@ import { GlobalStyles } from '../../constants/GlobalStyles';
 
 interface Props {
   type: 'temp' | 'hum';
-  value: number| null;
+  value: number | null | undefined; // <--- Agregado undefined por seguridad
   label?: string;
 }
 
@@ -28,6 +28,10 @@ export default function ClimateCard({ type, value, label }: Props) {
     description: 'Ambiente'
   };
 
+  // --- VALIDACIÓN SEGURA ---
+  // Verifica que sea estrictamente un número antes de usar toFixed
+  const safeValue = typeof value === 'number' ? value.toFixed(1) : "--";
+
   return (
     <View style={[GlobalStyles.card, styles.cardContainer]}>
       
@@ -44,7 +48,7 @@ export default function ClimateCard({ type, value, label }: Props) {
       {/* BODY COMPACTO */}
       <View style={styles.body}>
         <Text style={[styles.value, { color: config.color }]}>
-          {value !== null ? value.toFixed(1) : "--"}
+          {safeValue}
         </Text>
         <Text style={[styles.unit, { color: config.color }]}>
           {config.unit}
@@ -59,8 +63,8 @@ const styles = StyleSheet.create({
   cardContainer: {
     padding: 0, 
     borderRadius: 12,
-    flex: 1, // CLAVE: Permite que la tarjeta crezca para llenar su mitad
-    marginHorizontal: 4, // Pequeño espacio entre tarjetas
+    flex: 1, 
+    marginHorizontal: 4, 
   },
   header: {
     flexDirection: 'row',
@@ -89,7 +93,7 @@ const styles = StyleSheet.create({
     paddingVertical: 15,
   },
   value: {
-    fontSize: 42, // Reducido para que quepan dos en fila
+    fontSize: 42, 
     fontWeight: 'bold',
     includeFontPadding: false,
   },

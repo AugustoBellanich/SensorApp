@@ -11,6 +11,7 @@ import React, {
 import { PermissionsAndroid, Platform } from "react-native";
 import {
   BleManager,
+  ConnectionPriority,
   Device,
   ScanMode,
   Subscription,
@@ -23,21 +24,33 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const withTimeout = <T,>(
   promise: Promise<T>,
   ms: number,
-  fallback: T
+  fallback: T,
+  tag: string
 ): Promise<T> => {
   return Promise.race([
     promise,
-    new Promise<T>((resolve) => setTimeout(() => resolve(fallback), ms)),
+    new Promise<T>((resolve) =>
+      setTimeout(() => {
+        console.log(`[TIMEOUT] ${tag} (>${ms}ms)`);
+        resolve(fallback);
+      }, ms)
+    ),
   ]);
 };
 
-const CONNECTION_TIMEOUT_MS = 20000;
+// 30s es seguro para el N01
+const CONNECTION_TIMEOUT_MS = 30000;
 
 const logTrace = (step: string, msg: string) =>
   console.log(`[BLE-TRACE] (${step}) ${msg}`);
 
 // --- TIPOS ---
-export type DeviceCategory = "WATER" | "SOIL" | "CLIMATE" | "GATEWAY" | "UNKNOWN";
+export type DeviceCategory =
+  | "WATER"
+  | "SOIL"
+  | "CLIMATE"
+  | "GATEWAY"
+  | "UNKNOWN";
 
 export interface SensorInfo {
   modelNumber: string;
@@ -96,10 +109,19 @@ const INITIAL_DIAGNOSIS_STATUS: DiagnosisStatus = {
   rtcStatus: "ERROR",
 };
 
-// --- HELPERS DECODIFICACIÓN REFORZADOS (ANTI-CRASH) ---
+// --- UUIDS ESTÁNDAR CANÓNICOS (Para evitar errores de formato en Android) ---
+const STD_UUIDS = {
+  DEV_INFO_SVC: "0000180a-0000-1000-8000-00805f9b34fb",
+  MODEL_NUM: "00002a24-0000-1000-8000-00805f9b34fb",
+  SERIAL_NUM: "00002a25-0000-1000-8000-00805f9b34fb",
+  BATTERY_SVC: "0000180f-0000-1000-8000-00805f9b34fb",
+  BATTERY_LVL: "00002a19-0000-1000-8000-00805f9b34fb",
+};
+
+// --- HELPERS ---
 const base64ToUtf8 = (value?: string | null): string => {
+  if (!value) return "";
   try {
-    if (!value || value.length < 2) return "";
     return Buffer.from(value, "base64").toString("utf8").trim();
   } catch {
     return "";
@@ -148,7 +170,9 @@ export const BleProvider = ({ children }: { children: React.ReactNode }) => {
   const [sensorInfo, setSensorInfo] = useState<SensorInfo | null>(null);
   const [sensorData, setSensorData] = useState<SensorData>({});
   const [scannedDevices, setScannedDevices] = useState<Device[]>([]);
-  const [diagnosisStatus, setDiagnosisStatus] = useState<DiagnosisStatus>(INITIAL_DIAGNOSIS_STATUS);
+  const [diagnosisStatus, setDiagnosisStatus] = useState<DiagnosisStatus>(
+    INITIAL_DIAGNOSIS_STATUS
+  );
 
   const isScanningRef = useRef(false);
   const isDisconnectingRef = useRef(false);
@@ -163,22 +187,54 @@ export const BleProvider = ({ children }: { children: React.ReactNode }) => {
     setScannedDevices([]);
   }, []);
 
+  // --- LECTURA SEGURA ---
   const safeReadCharacteristic = useCallback(
-    async (deviceId: string, serviceUUID: string, charUUID: string): Promise<string | null> => {
-      return withTimeout(
-        (async () => {
-          try {
-            const isAlive = await manager.isDeviceConnected(deviceId);
-            if (!isAlive) return null;
-            const char = await manager.readCharacteristicForDevice(deviceId, serviceUUID, charUUID);
-            return char?.value || null;
-          } catch {
+    async (
+      deviceId: string,
+      serviceUUID: string,
+      charUUID: string
+    ): Promise<string | null> => {
+      // Normalizamos UUID para logs (los últimos 4 chars)
+      const uuidShort = charUUID ? charUUID.slice(-4) : "????";
+
+      const performRead = async () => {
+        try {
+          const isAlive = await manager
+            .isDeviceConnected(deviceId)
+            .catch(() => false);
+          if (!isAlive) {
+            console.log(`[READ-FAIL] ${uuidShort}: Disconnected`);
             return null;
           }
-        })(),
-        3000,
-        null
+          const char = await manager.readCharacteristicForDevice(
+            deviceId,
+            serviceUUID,
+            charUUID
+          );
+          return char?.value || null;
+        } catch (e: any) {
+          console.log(`[READ-ERR] ${uuidShort}: ${e.message}`);
+          return null;
+        }
+      };
+
+      // Intentamos leer. Si falla, 1 reintento rápido.
+      let result = await withTimeout(
+        performRead(),
+        2500,
+        null,
+        `Read-${uuidShort}`
       );
+      if (result === null) {
+        await sleep(300);
+        result = await withTimeout(
+          performRead(),
+          2500,
+          null,
+          `Retry-${uuidShort}`
+        );
+      }
+      return result;
     },
     [manager]
   );
@@ -186,7 +242,9 @@ export const BleProvider = ({ children }: { children: React.ReactNode }) => {
   const requestPermissions = useCallback(async () => {
     if (Platform.OS === "android") {
       if ((DeviceInfo.platformApiLevel ?? -1) < 31) {
-        const granted = await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION);
+        const granted = await PermissionsAndroid.request(
+          PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION
+        );
         return granted === PermissionsAndroid.RESULTS.GRANTED;
       } else {
         const result = await PermissionsAndroid.requestMultiple([
@@ -195,97 +253,172 @@ export const BleProvider = ({ children }: { children: React.ReactNode }) => {
           PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
         ]);
         return (
-          result["android.permission.BLUETOOTH_CONNECT"] === PermissionsAndroid.RESULTS.GRANTED &&
-          result["android.permission.BLUETOOTH_SCAN"] === PermissionsAndroid.RESULTS.GRANTED &&
-          result["android.permission.ACCESS_FINE_LOCATION"] === PermissionsAndroid.RESULTS.GRANTED
+          result["android.permission.BLUETOOTH_CONNECT"] ===
+            PermissionsAndroid.RESULTS.GRANTED &&
+          result["android.permission.BLUETOOTH_SCAN"] ===
+            PermissionsAndroid.RESULTS.GRANTED &&
+          result["android.permission.ACCESS_FINE_LOCATION"] ===
+            PermissionsAndroid.RESULTS.GRANTED
         );
       }
     }
     return true;
   }, []);
 
-  const getDeviceInfo = useCallback(async (device: Device): Promise<SensorInfo> => {
-    let rawModel = "UNKNOWN";
-    let macAddress = device.id;
-    try {
-      const modelChar = await device.readCharacteristicForService(BLE_UUIDS.SVC_DEVICE_INFO, BLE_UUIDS.CHAR_MODEL_NUM).catch(() => null);
-      if (modelChar?.value) rawModel = base64ToUtf8(modelChar.value);
-      const serialChar = await device.readCharacteristicForService(BLE_UUIDS.SVC_DEVICE_INFO, BLE_UUIDS.CHAR_SERIAL_NUM).catch(() => null);
-      if (serialChar?.value) macAddress = base64ToUtf8(serialChar.value);
-    } catch {}
+  const getDeviceInfo = useCallback(
+    async (device: Device): Promise<SensorInfo> => {
+      // 1. ESTRATEGIA SEGURA PARA APK:
+      // En lugar de intentar leer el chip (que falla en Release por ProGuard),
+      // confiamos en el nombre que el dispositivo anuncia por aire.
 
-    if (rawModel === "UNKNOWN" || getDeviceCategory(rawModel) === "UNKNOWN") {
-      const name = device.name || "";
-      if (name.includes("B01")) rawModel = "B01";
-      else if (name.includes("C01")) rawModel = "C01";
-      else if (name.includes("A01")) rawModel = "A01";
-      else if (name.includes("N01")) rawModel = "N01";
-    }
-    return { modelNumber: rawModel, macAddress: macAddress, category: getDeviceCategory(rawModel) };
-  }, []);
+      let rawModel = "UNKNOWN";
+      const deviceName = device.name || device.localName || "";
 
-  // --- DIAGNOSIS SECUENCIAL (EVITA CRASHES POR BATCH) ---
-  const readDiagnosisAndConfig = useCallback(async (device: Device, category: DeviceCategory): Promise<DiagnosisStatus> => {
-    let status: DiagnosisStatus = { ...INITIAL_DIAGNOSIS_STATUS };
-    try {
-      logTrace("DIAGNOSIS", "Iniciando lectura secuencial...");
-      
-      const rtcSync = await safeReadCharacteristic(device.id, BLE_UUIDS.SVC_CONFIG, BLE_UUIDS.CONFIG.RTC_SYNC);
-      await sleep(100);
-      const sdEn = await safeReadCharacteristic(device.id, BLE_UUIDS.SVC_CONFIG, BLE_UUIDS.CONFIG.SD_ENABLE);
-      await sleep(100);
-      const loraEn = await safeReadCharacteristic(device.id, BLE_UUIDS.SVC_CONFIG, BLE_UUIDS.CONFIG.LORA_ENABLE);
-      await sleep(100);
-      const sdSt = await safeReadCharacteristic(device.id, BLE_UUIDS.SVC_STATUS, BLE_UUIDS.CHAR_SD_STATUS);
-      await sleep(100);
-      const loraSt = await safeReadCharacteristic(device.id, BLE_UUIDS.SVC_STATUS, BLE_UUIDS.CHAR_LORA_STATUS);
-      await sleep(100);
-      const rtcSt = await safeReadCharacteristic(device.id, BLE_UUIDS.SVC_STATUS, BLE_UUIDS.CHAR_RTC_STATUS);
+      // Identificación por nombre (Infalible y rápido)
+      if (deviceName.includes("B01")) rawModel = "B01";
+      else if (deviceName.includes("C01")) rawModel = "C01";
+      else if (deviceName.includes("N01")) rawModel = "N01";
+      else if (deviceName.includes("A01")) rawModel = "A01";
 
-      if (category === "GATEWAY") {
-        await sleep(150);
-        const ws = await safeReadCharacteristic(device.id, BLE_UUIDS.SVC_STATUS, BLE_UUIDS.STATUS.WIFI_STATUS);
-        status.wifiStatus = base64ToUtf8(ws);
-        await sleep(100);
-        const ls = await safeReadCharacteristic(device.id, BLE_UUIDS.SVC_STATUS, BLE_UUIDS.STATUS.LAST_SYNC);
-        status.lastSync = base64ToUtf8(ls);
-        await sleep(100);
-        const sl = await safeReadCharacteristic(device.id, BLE_UUIDS.SVC_STATUS, BLE_UUIDS.STATUS.SENSORS_LIST);
-        status.sensorsList = base64ToUtf8(sl);
+      // Solo si el nombre no sirvió, nos arriesgamos a leer (Plan B)
+      if (rawModel === "UNKNOWN") {
+        try {
+          console.log(
+            "[DEV-INFO] Nombre desconocido, intentando lectura nativa..."
+          );
+          // Si esto falla en APK, el catch lo atrapa y no rompe la app
+          const modelChar = await safeReadCharacteristic(
+            device.id,
+            STD_UUIDS.DEV_INFO_SVC,
+            STD_UUIDS.MODEL_NUM
+          );
+          if (modelChar) rawModel = base64ToUtf8(modelChar);
+        } catch {
+          console.log(
+            "[DEV-INFO] Lectura nativa falló o bloqueada por ProGuard."
+          );
+        }
       }
 
-      const rtcHardwareOK = parseBooleanString(rtcSt);
-      let rtcState: "OK" | "WARNING" | "ERROR" = "OK";
-      if (!rtcHardwareOK) rtcState = "ERROR";
-      else if (rtcSync) {
-        const rtcString = base64ToUtf8(rtcSync);
-        if (rtcString.length < 5 || rtcString.includes("1970")) rtcState = "WARNING";
+      // La MAC address es el ID del dispositivo, no hace falta leer el Serial Number
+      const macAddress = device.id;
+
+      console.log(`[DEV-INFO] Detectado: ${rawModel} (${macAddress})`);
+      return {
+        modelNumber: rawModel,
+        macAddress: macAddress,
+        category: getDeviceCategory(rawModel),
+      };
+    },
+    [safeReadCharacteristic]
+  );
+
+  const readDiagnosisAndConfig = useCallback(
+    async (
+      device: Device,
+      category: DeviceCategory
+    ): Promise<DiagnosisStatus> => {
+      let status: DiagnosisStatus = { ...INITIAL_DIAGNOSIS_STATUS };
+
+      try {
+        logTrace("DIAGNOSIS", "--- Iniciando (Modo Liviano) ---");
+
+        // Verificamos conexión
+        if (!(await manager.isDeviceConnected(device.id).catch(() => false))) {
+          return status;
+        }
+
+        // 1. LEER ESTADOS (Solo Booleans/Bytes - Muy Rápido y Seguro)
+        const sdEn = await safeReadCharacteristic(
+          device.id,
+          BLE_UUIDS.SVC_CONFIG,
+          BLE_UUIDS.CONFIG.SD_ENABLE
+        );
+        await sleep(50); // Pausa pequeña es suficiente para bytes
+
+        const loraEn = await safeReadCharacteristic(
+          device.id,
+          BLE_UUIDS.SVC_CONFIG,
+          BLE_UUIDS.CONFIG.LORA_ENABLE
+        );
+        await sleep(50);
+
+        const sdSt = await safeReadCharacteristic(
+          device.id,
+          BLE_UUIDS.SVC_STATUS,
+          BLE_UUIDS.CHAR_SD_STATUS
+        );
+        await sleep(50);
+
+        const loraSt = await safeReadCharacteristic(
+          device.id,
+          BLE_UUIDS.SVC_STATUS,
+          BLE_UUIDS.CHAR_LORA_STATUS
+        );
+        await sleep(50);
+
+        // ESTE ES EL CLAVE: Leemos solo si el módulo RTC funciona (1 byte)
+        // No leemos la fecha (String largo) para evitar el crash.
+        const rtcSt = await safeReadCharacteristic(
+          device.id,
+          BLE_UUIDS.SVC_STATUS,
+          BLE_UUIDS.CHAR_RTC_STATUS
+        );
+
+        // 2. GATEWAY (Opcional, si falla no es crítico)
+        if (category === "GATEWAY") {
+          await sleep(100);
+          try {
+            const ws = await safeReadCharacteristic(
+              device.id,
+              BLE_UUIDS.SVC_STATUS,
+              BLE_UUIDS.STATUS.WIFI_STATUS
+            );
+            status.wifiStatus = base64ToUtf8(ws);
+          } catch {}
+        }
+
+        // --- PROCESAMIENTO ---
+        status.sdEnabled = parseBooleanString(sdEn);
+        status.loraEnabled = parseBooleanString(loraEn);
+        status.sdStatus = parseBooleanString(sdSt);
+        status.loraStatus = parseBooleanString(loraSt);
+
+        // Lógica Simplificada y Segura:
+        // Si el Hardware RTC dice "OK" (1), ponemos estado OK.
+        // Si dice "Fail" (0), ponemos ERROR.
+        // Ya no validamos la fecha exacta aquí.
+        const rtcHardwareOK = parseBooleanString(rtcSt);
+        status.rtcStatus = rtcHardwareOK ? "OK" : "ERROR";
+
+        status.syncStatus = "IDLE";
+
+        logTrace("DIAGNOSIS", "✅ Lectura Rápida Finalizada");
+        return status;
+      } catch (e) {
+        console.log("[DIAG] Error en lectura liviana", e);
+        return INITIAL_DIAGNOSIS_STATUS;
       }
+    },
+    [safeReadCharacteristic, manager]
+  );
 
-      status.sdEnabled = parseBooleanString(sdEn);
-      status.loraEnabled = parseBooleanString(loraEn);
-      status.sdStatus = parseBooleanString(sdSt);
-      status.loraStatus = parseBooleanString(loraSt);
-      status.rtcStatus = rtcState;
-      status.syncStatus = "IDLE";
-      return status;
-    } catch {
-      return INITIAL_DIAGNOSIS_STATUS;
-    }
-  }, [safeReadCharacteristic]);
-
-  const stopMonitoringData = useCallback((forceNativeRemove: boolean = true) => {
-    if (activeSubscriptions.current.length === 0) return;
-    if (forceNativeRemove) {
-      activeSubscriptions.current.forEach((sub) => {
-        try { if (sub) sub.remove(); } catch {}
-      });
-    }
-    activeSubscriptions.current = [];
-  }, []);
+  const stopMonitoringData = useCallback(
+    (forceNativeRemove: boolean = true) => {
+      if (activeSubscriptions.current.length === 0) return;
+      if (forceNativeRemove) {
+        activeSubscriptions.current.forEach((sub) => {
+          try {
+            if (sub) sub.remove();
+          } catch {}
+        });
+      }
+      activeSubscriptions.current = [];
+    },
+    []
+  );
 
   const stopScan = useCallback(() => {
-    logTrace("SCAN", "Stop.");
     manager.stopDeviceScan();
     updateScanningState(false);
   }, [manager]);
@@ -293,15 +426,23 @@ export const BleProvider = ({ children }: { children: React.ReactNode }) => {
   const startScan = useCallback(async () => {
     const perm = await requestPermissions();
     if (!perm || isScanningRef.current) return;
-    logTrace("SCAN", "Iniciando escaneo...");
     setScannedDevices([]);
     updateScanningState(true);
-    manager.startDeviceScan(null, { scanMode: ScanMode.LowLatency }, (error, device) => {
-      if (error) { updateScanningState(false); return; }
-      if (device?.name?.includes("SEN-")) {
-        setScannedDevices(prev => (!prev.find(d => d.id === device.id) ? [...prev, device] : prev));
+    manager.startDeviceScan(
+      null,
+      { scanMode: ScanMode.LowLatency },
+      (error, device) => {
+        if (error) {
+          updateScanningState(false);
+          return;
+        }
+        if (device?.name?.includes("SEN-")) {
+          setScannedDevices((prev) =>
+            !prev.find((d) => d.id === device.id) ? [...prev, device] : prev
+          );
+        }
       }
-    });
+    );
   }, [manager, requestPermissions]);
 
   const disconnectDevice = useCallback(async () => {
@@ -310,9 +451,11 @@ export const BleProvider = ({ children }: { children: React.ReactNode }) => {
       setIsBusy(true);
       isDisconnectingRef.current = true;
       stopMonitoringData(false);
-      try { 
-          const isAlive = await manager.isDeviceConnected(connectedDevice.id).catch(() => false);
-          if (isAlive) await connectedDevice.cancelConnection(); 
+      try {
+        const isAlive = await manager
+          .isDeviceConnected(connectedDevice.id)
+          .catch(() => false);
+        if (isAlive) await connectedDevice.cancelConnection();
       } catch {}
       setConnectedDevice(null);
       setSensorInfo(null);
@@ -323,110 +466,206 @@ export const BleProvider = ({ children }: { children: React.ReactNode }) => {
     }
   }, [connectedDevice, stopMonitoringData, manager]);
 
-  const startMonitoringData = useCallback(async (device: Device, category: DeviceCategory) => {
-    stopMonitoringData(true);
-    logTrace("MONITOR", `Iniciando monitoreo (${category})...`);
+  const startMonitoringData = useCallback(
+    async (device: Device, category: DeviceCategory) => {
+      stopMonitoringData(true);
+      logTrace("MONITOR", `Iniciando (${category})`);
 
-    const UUID_BAT_SVC = "0000180f-0000-1000-8000-00805f9b34fb";
-    const UUID_BAT_CHAR = "00002a19-0000-1000-8000-00805f9b34fb";
-
-    try {
-        const batChar = await device.readCharacteristicForService(UUID_BAT_SVC, UUID_BAT_CHAR).catch(() => null);
-        if (batChar?.value) {
-            const val = decodeBinaryByte(batChar.value);
-            setSensorData(prev => ({ ...prev, battery: val }));
+      // Intento de lectura inicial de batería
+      try {
+        const batChar = await safeReadCharacteristic(
+          device.id,
+          STD_UUIDS.BATTERY_SVC,
+          STD_UUIDS.BATTERY_LVL
+        );
+        if (batChar) {
+          const val = decodeBinaryByte(batChar);
+          setSensorData((prev) => ({ ...prev, battery: val }));
         }
-    } catch {}
+      } catch {}
 
-    const charsToMonitor = [
-      { service: UUID_BAT_SVC, char: UUID_BAT_CHAR, updateKey: "battery", isBinary: true },
-    ];
+      const charsToMonitor = [
+        {
+          service: STD_UUIDS.BATTERY_SVC,
+          char: STD_UUIDS.BATTERY_LVL,
+          updateKey: "battery",
+          isBinary: true,
+        },
+      ];
 
-    if (category === "SOIL") {
-      charsToMonitor.push(
-        { service: BLE_UUIDS.SVC_SENSORS, char: BLE_UUIDS.B01.TEMP_SOIL, updateKey: "soilTemp", isBinary: false },
-        { service: BLE_UUIDS.SVC_SENSORS, char: BLE_UUIDS.B01.MOIST_1, updateKey: "moisture1", isBinary: false },
-        { service: BLE_UUIDS.SVC_SENSORS, char: BLE_UUIDS.B01.MOIST_2, updateKey: "moisture2", isBinary: false },
-        { service: BLE_UUIDS.SVC_SENSORS, char: BLE_UUIDS.B01.MOIST_3, updateKey: "moisture3", isBinary: false }
-      );
-    } else if (category === "CLIMATE") {
-      charsToMonitor.push(
-        { service: BLE_UUIDS.SVC_SENSORS, char: BLE_UUIDS.C01.TEMP_AMB, updateKey: "airTemp", isBinary: false },
-        { service: BLE_UUIDS.SVC_SENSORS, char: BLE_UUIDS.C01.HUM_AMB, updateKey: "humidity", isBinary: false }
-      );
-    }
+      if (category === "SOIL") {
+        charsToMonitor.push(
+          {
+            service: BLE_UUIDS.SVC_SENSORS,
+            char: BLE_UUIDS.B01.TEMP_SOIL,
+            updateKey: "soilTemp",
+            isBinary: false,
+          },
+          {
+            service: BLE_UUIDS.SVC_SENSORS,
+            char: BLE_UUIDS.B01.MOIST_1,
+            updateKey: "moisture1",
+            isBinary: false,
+          },
+          {
+            service: BLE_UUIDS.SVC_SENSORS,
+            char: BLE_UUIDS.B01.MOIST_2,
+            updateKey: "moisture2",
+            isBinary: false,
+          },
+          {
+            service: BLE_UUIDS.SVC_SENSORS,
+            char: BLE_UUIDS.B01.MOIST_3,
+            updateKey: "moisture3",
+            isBinary: false,
+          }
+        );
+      } else if (category === "CLIMATE") {
+        charsToMonitor.push(
+          {
+            service: BLE_UUIDS.SVC_SENSORS,
+            char: BLE_UUIDS.C01.TEMP_AMB,
+            updateKey: "airTemp",
+            isBinary: false,
+          },
+          {
+            service: BLE_UUIDS.SVC_SENSORS,
+            char: BLE_UUIDS.C01.HUM_AMB,
+            updateKey: "humidity",
+            isBinary: false,
+          }
+        );
+      }
 
-    charsToMonitor.forEach(({ service, char, updateKey, isBinary }: any) => {
-      const sub = device.monitorCharacteristicForService(service, char, (error, characteristic) => {
-        if (error || !characteristic?.value) return;
-        const value = isBinary ? decodeBinaryByte(characteristic.value) : decodeNumericString(characteristic.value);
-        if (!isNaN(value)) setSensorData(prev => ({ ...prev, [updateKey]: value }));
+      charsToMonitor.forEach(({ service, char, updateKey, isBinary }: any) => {
+        const sub = device.monitorCharacteristicForService(
+          service,
+          char,
+          (error, characteristic) => {
+            if (error || !characteristic?.value) return;
+            const value = isBinary
+              ? decodeBinaryByte(characteristic.value)
+              : decodeNumericString(characteristic.value);
+            if (!isNaN(value))
+              setSensorData((prev) => ({ ...prev, [updateKey]: value }));
+          }
+        );
+        activeSubscriptions.current.push(sub);
       });
-      activeSubscriptions.current.push(sub);
-    });
-  }, [stopMonitoringData]);
+    },
+    [stopMonitoringData, safeReadCharacteristic]
+  );
 
-  const connectToDevice = useCallback(async (device: Device) => {
-    if (isBusy) return;
-    setIsBusy(true);
-    logTrace("CONNECT", `Conectando a ${device.id}...`);
+  const connectToDevice = useCallback(
+    async (device: Device) => {
+      if (isBusy) return;
+      setIsBusy(true);
+      logTrace("CONNECT", `Conectando a ${device.id}...`);
 
-    try {
-      stopScan();
-      if (connectedDevice) {
-        await disconnectDevice();
-        await sleep(500);
-      }
-      isDisconnectingRef.current = false;
+      try {
+        stopScan();
+        if (connectedDevice) {
+          await disconnectDevice();
+          await sleep(500);
+        }
+        isDisconnectingRef.current = false;
 
-      logTrace("CONNECT", "Iniciando...");
-      const connected = await device.connect({ autoConnect: false, timeout: 15000 });
-      
-      if (Platform.OS === 'android') {
-          logTrace("CONNECT", "Negociando MTU...");
-          await connected.requestMTU(512).catch(() => {});
-      }
+        logTrace("CONNECT", "Iniciando...");
+        const connected = await device.connect({
+          autoConnect: false,
+          timeout: CONNECTION_TIMEOUT_MS,
+        });
 
-      logTrace("CONNECT", "Discovery...");
-      await connected.discoverAllServicesAndCharacteristics();
-      
-      const info = await getDeviceInfo(connected);
-      logTrace("CONNECT", "Diagnosis...");
-      const diagnosis = await readDiagnosisAndConfig(connected, info.category);
-      setDiagnosisStatus(diagnosis);
+        // 1. SOLICITAR ALTA PRIORIDAD (CRUCIAL EN ANDROID)
+        if (Platform.OS === "android") {
+          logTrace("CONNECT", "Solicitando Alta Prioridad...");
+          // Priority 1 = High Priority (Reduce latencia, vital para el handshake)
+          await connected
+            .requestConnectionPriority(ConnectionPriority.High)
+            .catch(() => {});
+          await sleep(300); // Dar tiempo a que cambie el modo
+        }
 
-      logTrace("CONNECT", "Monitoreo...");
-      await startMonitoringData(connected, info.category);
+        logTrace("CONNECT", "Discovery...");
+        await connected.discoverAllServicesAndCharacteristics();
 
-      setConnectedDevice(connected);
-      setSensorInfo(info);
+        // 2. PAUSA AJUSTADA (Ni muy corta para saturar, ni muy larga para desconectar)
+        console.log("[CONNECT] ⏳ Estabilizando (1.0s)...");
+        await sleep(1000);
 
-      const discSub = connected.onDisconnected(() => {
-        logTrace("DISCONNECT", "Inesperada");
+        const info = await getDeviceInfo(connected);
+
+        logTrace("CONNECT", "Diagnosis...");
+        const diagnosis = await readDiagnosisAndConfig(
+          connected,
+          info.category
+        );
+        setDiagnosisStatus(diagnosis);
+
+        logTrace("CONNECT", "Monitoreo...");
+        await startMonitoringData(connected, info.category);
+
+        setConnectedDevice(connected);
+        setSensorInfo(info);
+
+        const discSub = connected.onDisconnected(() => {
+          logTrace("DISCONNECT", "Inesperada");
+          stopMonitoringData(false);
+          setConnectedDevice(null);
+          setDiagnosisStatus(INITIAL_DIAGNOSIS_STATUS);
+          discSub.remove();
+        });
+
+        logTrace("CONNECT", "✅ Exitoso");
+      } catch (error: any) {
+        logTrace("CONNECT_ERR", error.message || "Error");
         stopMonitoringData(false);
+        await manager.cancelDeviceConnection(device.id).catch(() => {});
         setConnectedDevice(null);
-        setDiagnosisStatus(INITIAL_DIAGNOSIS_STATUS);
-        discSub.remove();
-      });
-
-      logTrace("CONNECT", "✅ Exitoso");
-    } catch (error: any) {
-      logTrace("CONNECT_ERR", error.message || "Error");
-      stopMonitoringData(false);
-      await manager.cancelDeviceConnection(device.id).catch(() => {});
-      setConnectedDevice(null);
-      throw error;
-    } finally {
-      setIsBusy(false);
-    }
-  }, [stopScan, connectedDevice, isBusy, disconnectDevice, getDeviceInfo, readDiagnosisAndConfig, startMonitoringData, stopMonitoringData, manager]);
+        if (error.message?.includes("keep awake")) return;
+        throw error;
+      } finally {
+        setIsBusy(false);
+      }
+    },
+    [
+      stopScan,
+      connectedDevice,
+      isBusy,
+      disconnectDevice,
+      getDeviceInfo,
+      readDiagnosisAndConfig,
+      startMonitoringData,
+      stopMonitoringData,
+      manager,
+    ]
+  );
 
   useEffect(() => {
-    return () => { manager.stopDeviceScan(); };
+    return () => {
+      manager.stopDeviceScan();
+    };
   }, [manager]);
 
   return (
-    <BleContext.Provider value={{ manager, isScanning, isBusy, connectedDevice, sensorInfo, sensorData, diagnosisStatus, scannedDevices, startScan, stopScan, connectToDevice, disconnectDevice, clearScannedDevices, requestPermissions }}>
+    <BleContext.Provider
+      value={{
+        manager,
+        isScanning,
+        isBusy,
+        connectedDevice,
+        sensorInfo,
+        sensorData,
+        diagnosisStatus,
+        scannedDevices,
+        startScan,
+        stopScan,
+        connectToDevice,
+        disconnectDevice,
+        clearScannedDevices,
+        requestPermissions,
+      }}
+    >
       {children}
     </BleContext.Provider>
   );
