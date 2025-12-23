@@ -1,6 +1,6 @@
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { Stack, useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
-import React, { useCallback, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import {
   ActivityIndicator,
   ScrollView,
@@ -39,7 +39,7 @@ export default function SensorDashboard() {
   const router = useRouter();
   const sensorIdStr = Array.isArray(id) ? id[0] : id;
 
-  const { connectedDevice, sensorData, diagnosisStatus } = useBle();
+  const { connectedDevice, disconnectDevice, sensorData, diagnosisStatus } = useBle();
   const isConnected = !!connectedDevice;
 
   const [dbSensor, setDbSensor] = useState<SensorEntity | null>(null);
@@ -109,6 +109,17 @@ export default function SensorDashboard() {
       return () => { isActive = false; };
     }, [sensorIdStr, connectedDevice]) // Agregamos connectedDevice a dependencias para recargar si se desconecta
   );
+
+  useEffect(() => {
+    // Esta función se ejecuta cuando el componente se monta
+    return () => {
+      // Esta función se ejecuta cuando el componente se DESMONTA (Sales de la pantalla)
+      if (connectedDevice) {
+        console.log("[DASHBOARD] Desmontando vista -> Desconectando dispositivo...");
+        disconnectDevice(); 
+      }
+    };
+  }, []);
 
   const modelType = dbSensor?.type || (sensorIdStr.includes("B01") ? "B01" : "C01");
   const isClimate = modelType === "C01";

@@ -137,22 +137,34 @@ export default function HomeScreen() {
   useFocusEffect(
     useCallback(() => {
       let timeoutId: any;
+
       const onFocus = async () => {
+        // 1. Limpieza UI
         clearScannedDevices();
         setDisplayList([]);
         await loadSensorsFromDB();
-        timeoutId = setTimeout(() => {
-          if (!connectedDevice && !isBusy) {
-            startScan();
-          }
-        }, 500);
+
+        // 2. Lógica de seguridad para iniciar escaneo
+        // Esperamos un poco más para asegurar que el BLE stack esté libre tras la desconexión
+        timeoutId = setTimeout(async () => {
+            // Verificar explícitamente que NO estamos conectados ni ocupados
+            // A veces connectedDevice tarda en ser null, verificamos isBusy también
+            if (!connectedDevice && !isBusy) {
+               console.log("[HOME] Iniciando escaneo seguro...");
+               startScan();
+            } else {
+               console.log("[HOME] BLE Ocupado o Conectado, saltando escaneo.");
+               // Opcional: Podrías forzar un disconnect aquí si detectas un estado inconsistente
+            }
+        }, 800); // Aumenté el tiempo de 500 a 800ms para dar aire al Garbage Collector
       };
+
       onFocus();
+
       return () => {
         clearTimeout(timeoutId);
         stopScan();
       };
-      // CORRECCIÓN: Agregadas dependencias faltantes para evitar error de lint
     }, [connectedDevice, isBusy, clearScannedDevices, startScan, stopScan])
   );
 

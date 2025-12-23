@@ -1,19 +1,19 @@
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { Buffer } from "buffer";
 import {
-    Stack,
-    useLocalSearchParams,
-    useRouter,
+  Stack,
+  useLocalSearchParams,
+  useRouter,
 } from "expo-router";
 import React, { useEffect, useMemo, useState } from "react";
 import {
-    ActivityIndicator,
-    Alert,
-    ScrollView,
-    StyleSheet,
-    Text,
-    TouchableOpacity,
-    View,
+  ActivityIndicator,
+  Alert,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
 } from "react-native";
 
 import SensorInfoBar from "../../../components/sensor/SensorInfoBar";
@@ -24,9 +24,9 @@ import { getSensorById } from "../../../database/SensorRepository";
 import { SensorEntity } from "../../../database/types";
 // Asegúrate de que la ruta sea correcta según donde creaste el archivo
 import {
-    getBatteryColor,
-    getBatteryIcon,
-    getBatteryPercentage,
+  getBatteryColor,
+  getBatteryIcon,
+  getBatteryPercentage,
 } from "../../../utils/batteryUtils";
 
 // --- HELPER: FORMATO FECHA ARGENTINA ---

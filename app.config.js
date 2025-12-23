@@ -72,7 +72,6 @@ export default ({ config }) => {
           "isBackgroundEnabled": true,
           "modes": ["central"],
           "bluetoothAlwaysPermission": "Permitir a Sensor App conectarse a los sensores",
-          "bluetoothPeripheralPermission": "Permitir a Sensor App buscar sensores cercanos"
         }
       ]
     ],
