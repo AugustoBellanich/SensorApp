@@ -7,14 +7,14 @@ import { Stack, useLocalSearchParams, useRouter } from "expo-router";
 import * as Sharing from "expo-sharing";
 import React, { useCallback, useEffect, useState } from "react";
 import {
-    ActivityIndicator,
-    Alert,
-    Modal,
-    ScrollView,
-    StyleSheet,
-    Text,
-    TouchableOpacity,
-    View,
+  ActivityIndicator,
+  Alert,
+  Modal,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import * as XLSX from "xlsx";
@@ -29,9 +29,9 @@ import { Colors } from "../../../constants/Colors";
 import { getElectrodesBySensor } from "../../../database/ElectrodeRepository";
 import { getSensorById } from "../../../database/SensorRepository";
 import {
-    ElectrodeEntity,
-    LinearSegment,
-    SensorEntity,
+  ElectrodeEntity,
+  LinearSegment,
+  SensorEntity,
 } from "../../../database/types";
 
 // Utils
@@ -44,6 +44,13 @@ import { supabase } from "../../../lib/supabase";
 
 type UnitType = "% Hv" | "% Hg" | "mV";
 type ViewMode = "optimized" | "real";
+
+// --- CONSTANTES AGRONÓMICAS ---
+const CLIMATE_LINES = [
+  { value: 0, label: 'Helada', color: '#4FC3F7' },     // Azul claro
+  { value: 7.2, label: 'Hora Frío', color: '#1E88E5' }, // Azul medio
+  { value: 35, label: 'Calor Ext.', color: '#FF7043' }  // Naranja
+];
 
 export default function CloudDataScreen() {
   const { id } = useLocalSearchParams();
@@ -75,11 +82,13 @@ export default function CloudDataScreen() {
   const [isConfigLoaded, setIsConfigLoaded] = useState(false);
 
   // Datos
-  const [cloudData, setCloudData] = useState<any[]>([]); // Renombrado a cloudData
+  const [cloudData, setCloudData] = useState<any[]>([]); 
   const [electrodesData, setElectrodesData] = useState<any>(null);
   const [soilTempData, setSoilTempData] = useState<any>(null);
   const [climateData, setClimateData] = useState<any>(null);
-  const [agroStats, setAgroStats] = useState<any>(null);
+  
+  // ESTADO NUEVO: Indicadores Agronómicos
+  const [agroStats, setAgroStats] = useState({ chill: 0, frost: 0, heat: 0 });
 
   // 1. Init: Cargar Configuración Local del Sensor
   useEffect(() => {
@@ -216,7 +225,29 @@ export default function CloudDataScreen() {
         }
         return { data: formatChart(finalData), stats: calcStats(finalData) };
       };
+      
       setClimateData({ temp: prep("air_temp"), hum: prep("humidity") });
+
+      // LÓGICA DE CÁLCULO AGRONÓMICO
+      let chill = 0, frost = 0, heat = 0;
+      
+      // Ordenar por fecha para calcular diferenciales
+      const sorted = [...data].sort((a,b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+
+      for (let i = 1; i < sorted.length; i++) {
+         const t1 = new Date(sorted[i-1].timestamp).getTime();
+         const t2 = new Date(sorted[i].timestamp).getTime();
+         const hours = (t2 - t1) / 3600000; // Diferencia en horas
+
+         if (hours > 24) continue; // Saltar huecos grandes
+
+         const t = Number(sorted[i].air_temp);
+         if (t > 0 && t <= 7.2) chill += hours;
+         if (t <= 0) frost += hours;
+         if (t >= 35) heat += hours;
+      }
+      
+      setAgroStats({ chill, frost, heat });
     },
     [formatChart, calcStats, viewMode]
   );
@@ -261,7 +292,7 @@ export default function CloudDataScreen() {
             .gte('timestamp', s.toISOString())
             .lte('timestamp', e.toISOString())
             .order('timestamp', { ascending: true })
-            .limit(2000); // Límite de seguridad para no explotar la memoria
+            .limit(2000); 
 
         if (error) throw error;
         
@@ -465,9 +496,34 @@ export default function CloudDataScreen() {
         {/* Gráficos C01 */}
         {sensorDb?.type === "C01" && climateData && (
           <View style={styles.content}>
+            
+            {/* PANEL DE INDICADORES (NUEVO) */}
+            <Text style={[styles.sectionTitle, {marginLeft: 16}]}>Indicadores Calculados</Text>
+            <View style={styles.agroPanel}>
+                <View style={styles.agroItem}>
+                    <MaterialCommunityIcons name="snowflake" size={24} color="#004aad" />
+                    <Text style={styles.agroValue}>{Math.round(agroStats.chill)} h</Text>
+                    <Text style={styles.agroLabel}>Horas Frío</Text>
+                </View>
+                <View style={styles.dividerVertical} />
+                <View style={styles.agroItem}>
+                    <MaterialCommunityIcons name="alert-octagon" size={24} color={agroStats.frost > 0 ? Colors.error : '#ccc'} />
+                    <Text style={[styles.agroValue, {color: agroStats.frost > 0 ? Colors.error : Colors.textPrimary}]}>
+                        {Math.round(agroStats.frost)} h
+                    </Text>
+                    <Text style={styles.agroLabel}>Heladas</Text>
+                </View>
+                <View style={styles.dividerVertical} />
+                <View style={styles.agroItem}>
+                    <MaterialCommunityIcons name="white-balance-sunny" size={24} color={Colors.warning} />
+                    <Text style={styles.agroValue}>{Math.round(agroStats.heat)} h</Text>
+                    <Text style={styles.agroLabel}>Calor Ext.</Text>
+                </View>
+            </View>
+
             <View style={styles.chartBox}>
               <Text style={styles.sectionTitle}>Temperatura (°C)</Text>
-              <SensorChart data={climateData.temp.data} type="line" unit="°C" color={Colors.secondary} spacing={spacing} />
+              <SensorChart data={climateData.temp.data} type="line" unit="°C" color={Colors.secondary} spacing={spacing} referenceLines={CLIMATE_LINES} />
             </View>
             <View style={styles.chartBox}>
               <Text style={styles.sectionTitle}>Humedad (%)</Text>
@@ -505,11 +561,11 @@ const styles = StyleSheet.create({
   dateLabel: { fontSize: 10, color: "#888" },
   dateVal: { fontSize: 14, fontWeight: "bold", color: "#333" },
 
-  searchButton: { flexDirection: "row", backgroundColor: Colors.secondary, padding: 12, borderRadius: 10, justifyContent: "center", alignItems: "center", gap: 8 },
+  searchButton: { flexDirection: "row", backgroundColor: Colors.primary, padding: 12, borderRadius: 10, justifyContent: "center", alignItems: "center", gap: 8 },
   searchBtnText: { color: "#fff", fontWeight: "bold", fontSize: 16 },
 
   toolbar: { flexDirection: "row", paddingHorizontal: 16, marginBottom: 15, gap: 10 },
-  toolBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", padding: 12, borderRadius: 10, gap: 5 },
+  toolBtn: { flex: 1, flexDirection: "row", alignItems: "center", justifyContent: "center", padding: 12, borderRadius: 10, gap: 5 },
   toolText: { fontWeight: "bold", fontSize: 14 },
 
   controlsContainer: { paddingHorizontal: 16, marginBottom: 15 },
@@ -527,6 +583,13 @@ const styles = StyleSheet.create({
   content: { paddingHorizontal: 16 },
   chartBox: { marginBottom: 25 },
   sectionTitle: { fontSize: 16, fontWeight: "bold", color: Colors.textPrimary, marginBottom: 8 },
+  
+  // PANEL AGRO
+  agroPanel: { flexDirection: 'row', backgroundColor: '#fff', borderRadius: 16, padding: 15, elevation: 2, marginBottom: 25, marginHorizontal: 16, borderWidth: 1, borderColor: '#eee', justifyContent: 'space-between' },
+  agroItem: { flex: 1, alignItems: 'center' },
+  agroValue: { fontSize: 18, fontWeight: 'bold', color: Colors.textPrimary, marginVertical: 4 },
+  agroLabel: { fontSize: 11, fontWeight: 'bold', color: Colors.textSecondary },
+  dividerVertical: { width: 1, backgroundColor: '#eee', height: '80%', alignSelf: 'center' },
   
   loadingOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'center', alignItems: 'center' },
   loadingContainer: { backgroundColor: '#fff', padding: 25, borderRadius: 12, alignItems: 'center', elevation: 5 },

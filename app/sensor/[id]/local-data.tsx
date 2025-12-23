@@ -14,7 +14,7 @@ import {
   StyleSheet,
   Text,
   TouchableOpacity,
-  View,
+  View
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import * as XLSX from "xlsx";
@@ -46,6 +46,13 @@ import { getAgronomicLines } from "../../../utils/referenceLines";
 type UnitType = "% Hv" | "% Hg" | "mV";
 type ViewMode = "optimized" | "real";
 
+// --- CONSTANTES AGRONÓMICAS ---
+const CLIMATE_LINES = [
+  { value: 0, label: 'Helada', color: '#4FC3F7' },     // Azul claro
+  { value: 7.2, label: 'Hora Frío', color: '#1E88E5' }, // Azul medio
+  { value: 35, label: 'Calor Ext.', color: '#FF7043' }  // Naranja
+];
+
 export default function LocalDataScreen() {
   const { id } = useLocalSearchParams();
   const sensorId = Array.isArray(id) ? id[0] : id;
@@ -54,7 +61,7 @@ export default function LocalDataScreen() {
 
   // Estados
   const [loading, setLoading] = useState(false);
-  const [loadingMessage, setLoadingMessage] = useState(""); // Mensaje del Overlay
+  const [loadingMessage, setLoadingMessage] = useState(""); 
   const [sensorDb, setSensorDb] = useState<SensorEntity | null>(null);
 
   // Filtros
@@ -83,7 +90,7 @@ export default function LocalDataScreen() {
   const [electrodesData, setElectrodesData] = useState<any>(null);
   const [soilTempData, setSoilTempData] = useState<any>(null);
   const [climateData, setClimateData] = useState<any>(null);
-  const [agroStats, setAgroStats] = useState<any>(null);
+  const [agroStats, setAgroStats] = useState({ chill: 0, frost: 0, heat: 0 });
 
   // 1. Init
   useEffect(() => {
@@ -191,8 +198,6 @@ export default function LocalDataScreen() {
 
       const prep = (key: string) => {
         let finalData;
-
-        // FILTRO DE CALIDAD (Quitar ceros)
         const validData = processed.filter((p) => {
           const v = p[key];
           return v !== undefined && v !== null && !isNaN(v) && v > 0;
@@ -238,16 +243,28 @@ export default function LocalDataScreen() {
         }
         return { data: formatChart(finalData), stats: calcStats(finalData) };
       };
+      
       setClimateData({ temp: prep("air_temp"), hum: prep("humidity") });
-      let chill = 0,
-        frost = 0,
-        heat = 0;
-      data.forEach((d) => {
-        const t = Number(d.air_temp);
-        if (t > 0 && t <= 7.2) chill += 0.5;
-        if (t <= 0) frost += 0.5;
-        if (t >= 35) heat += 0.5;
-      });
+      
+      // CALCULO DE INDICADORES AGRONÓMICOS
+      let chill = 0, frost = 0, heat = 0;
+      
+      // Ordenamos por fecha para calcular diferenciales
+      const sorted = [...data].sort((a,b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+
+      for (let i = 1; i < sorted.length; i++) {
+         const t1 = new Date(sorted[i-1].timestamp).getTime();
+         const t2 = new Date(sorted[i].timestamp).getTime();
+         const hours = (t2 - t1) / 3600000; // Diferencia en horas
+
+         if (hours > 24) continue; // Saltamos huecos grandes
+
+         const t = Number(sorted[i].air_temp);
+         if (t > 0 && t <= 7.2) chill += hours;
+         if (t <= 0) frost += hours;
+         if (t >= 35) heat += hours;
+      }
+      
       setAgroStats({ chill, frost, heat });
     },
     [formatChart, calcStats, viewMode]
@@ -255,11 +272,9 @@ export default function LocalDataScreen() {
 
   const processData = useCallback(
     (data: any[], type: "B01" | "C01") => {
-      // Activar Loading brevemente al procesar datos para evitar freeze visual
       if (data.length > 500) { 
           setLoading(true);
           setLoadingMessage("Procesando gráficos...");
-          // Usar setTimeout para permitir que el UI se actualice antes de bloquear el hilo JS
           setTimeout(() => {
               if (type === "B01") processB01(data);
               else processC01(data);
@@ -273,7 +288,6 @@ export default function LocalDataScreen() {
     [processB01, processC01]
   );
 
-  // DB Call
   const handleSearchData = useCallback(
     async (sensor: SensorEntity, start: Date, end: Date) => {
       if (sensor.type !== "B01" && sensor.type !== "C01") return;
@@ -288,14 +302,12 @@ export default function LocalDataScreen() {
         e.setHours(23, 59, 59, 999);
         const type = sensor.type as "B01" | "C01";
         
-        // Simular un pequeño delay para que el usuario vea el loader
         await new Promise(r => setTimeout(r, 100));
 
         const data = await getReadingsInRange(sensorId, type, s, e);
         
         if (data && data.length > 0) {
           setLocalData(data);
-          // ProcessData manejará su propio loading si es pesado
           processData(data, type);
         } else {
           setLocalData([]);
@@ -316,24 +328,19 @@ export default function LocalDataScreen() {
       handleSearchData(sensorDb, dateStart, dateEnd);
   }, [isConfigLoaded, dateStart, dateEnd, handleSearchData, sensorDb]);
 
-  // Recalcular gráficos si cambian los parámetros de visualización
   useEffect(() => {
     if (localData.length > 0 && sensorDb) {
         processData(localData, sensorDb.type as "B01" | "C01");
     }
   }, [unit, viewMode, localData, sensorDb, processData]);
 
-  // --- ACTIONS ---
-
-  // 1. Exportar Excel
+  // Actions
   const handleExportExcel = async () => {
     if (localData.length === 0)
       return Alert.alert("Sin datos", "No hay datos para exportar.");
     try {
       setLoading(true);
       setLoadingMessage("Generando Excel...");
-      
-      // Delay para que se muestre el overlay
       await new Promise(r => setTimeout(r, 100));
 
       const isB01 = sensorDb?.type === "B01";
@@ -365,15 +372,14 @@ export default function LocalDataScreen() {
       const uri = FileSystem.cacheDirectory + `Sensor_${sensorId}.xlsx`;
       await FileSystem.writeAsStringAsync(uri, wbout, { encoding: "base64" });
       
-      setLoading(false); // Quitar overlay antes de compartir
+      setLoading(false); 
       if (await Sharing.isAvailableAsync()) await Sharing.shareAsync(uri);
-    } catch (e) {
+    } catch {
       setLoading(false);
       Alert.alert("Error", "Falló la exportación");
     }
   };
 
-  // 2. Eliminar Datos
   const handleDeleteData = () => {
     Alert.alert(
       "¿Eliminar datos?",
@@ -393,10 +399,9 @@ export default function LocalDataScreen() {
                 dateStart,
                 dateEnd
               );
-              // Recargar
               handleSearchData(sensorDb!, dateStart, dateEnd);
               Alert.alert("Eliminado", "Datos borrados correctamente.");
-            } catch (e) {
+            } catch {
               Alert.alert("Error", "No se pudieron borrar los datos.");
             } finally {
               setLoading(false);
@@ -442,7 +447,7 @@ export default function LocalDataScreen() {
 
       <ScrollView
         contentContainerStyle={{ paddingBottom: 100 }}
-        scrollEnabled={!loading} // Bloquear scroll si carga
+        scrollEnabled={!loading}
       >
         {/* Filtros */}
         <View style={styles.filterCard}>
@@ -479,7 +484,7 @@ export default function LocalDataScreen() {
           </TouchableOpacity>
         </View>
 
-        {/* --- BARRA DE HERRAMIENTAS --- */}
+        {/* Toolbar */}
         {localData.length > 0 && (
           <View style={styles.toolbar}>
             <TouchableOpacity
@@ -511,7 +516,7 @@ export default function LocalDataScreen() {
           </View>
         )}
 
-        {/* Controles */}
+        {/* Controles Visualización */}
         {localData.length > 0 && (
           <View style={styles.controlsContainer}>
             {sensorDb?.type === "B01" && (
@@ -526,7 +531,6 @@ export default function LocalDataScreen() {
               </View>
             )}
 
-            {/* --- SWITCH MEJORADO --- */}
             <View style={styles.switchContainer}>
               <TouchableOpacity
                 style={[
@@ -574,17 +578,9 @@ export default function LocalDataScreen() {
 
             <View style={styles.sliderContainer}>
               <View style={styles.sliderLabels}>
-                <MaterialCommunityIcons
-                  name="magnify-minus-outline"
-                  size={20}
-                  color={Colors.textSecondary}
-                />
+                <MaterialCommunityIcons name="magnify-minus-outline" size={20} color={Colors.textSecondary} />
                 <Text style={styles.sliderText}>Zoom</Text>
-                <MaterialCommunityIcons
-                  name="magnify-plus-outline"
-                  size={20}
-                  color={Colors.textSecondary}
-                />
+                <MaterialCommunityIcons name="magnify-plus-outline" size={20} color={Colors.textSecondary} />
               </View>
               <Slider
                 style={{ width: "100%", height: 40 }}
@@ -649,6 +645,31 @@ export default function LocalDataScreen() {
         {/* CLIMA C01 */}
         {sensorDb?.type === "C01" && climateData && (
           <View style={styles.content}>
+            
+            {/* PANEL DE INDICADORES (NUEVO) */}
+            <Text style={[styles.sectionTitle, {marginLeft: 16}]}>Indicadores Calculados</Text>
+            <View style={styles.agroPanel}>
+                <View style={styles.agroItem}>
+                    <MaterialCommunityIcons name="snowflake" size={24} color="#004aad" />
+                    <Text style={styles.agroValue}>{Math.round(agroStats.chill)} h</Text>
+                    <Text style={styles.agroLabel}>Horas Frío</Text>
+                </View>
+                <View style={styles.dividerVertical} />
+                <View style={styles.agroItem}>
+                    <MaterialCommunityIcons name="alert-octagon" size={24} color={agroStats.frost > 0 ? Colors.error : '#ccc'} />
+                    <Text style={[styles.agroValue, {color: agroStats.frost > 0 ? Colors.error : Colors.textPrimary}]}>
+                        {Math.round(agroStats.frost)} h
+                    </Text>
+                    <Text style={styles.agroLabel}>Heladas</Text>
+                </View>
+                <View style={styles.dividerVertical} />
+                <View style={styles.agroItem}>
+                    <MaterialCommunityIcons name="white-balance-sunny" size={24} color={Colors.warning} />
+                    <Text style={styles.agroValue}>{Math.round(agroStats.heat)} h</Text>
+                    <Text style={styles.agroLabel}>Calor Ext.</Text>
+                </View>
+            </View>
+
             <View style={styles.chartBox}>
               <Text style={styles.sectionTitle}>Temperatura (°C)</Text>
               <SensorChart
@@ -657,6 +678,7 @@ export default function LocalDataScreen() {
                 unit="°C"
                 color={Colors.secondary}
                 spacing={spacing}
+                referenceLines={CLIMATE_LINES} // LÍNEAS DE REFERENCIA AGREGADAS
               />
             </View>
             <View style={styles.chartBox}>
@@ -682,7 +704,7 @@ export default function LocalDataScreen() {
         )}
       </ScrollView>
 
-      {/* --- OVERLAY DE CARGA (NUEVO) --- */}
+      {/* --- OVERLAY DE CARGA --- */}
       <Modal transparent={true} animationType="fade" visible={loading}>
         <View style={styles.loadingOverlay}>
             <View style={styles.loadingContainer}>
@@ -748,7 +770,6 @@ const styles = StyleSheet.create({
   },
   searchBtnText: { color: "#fff", fontWeight: "bold", fontSize: 16 },
 
-  // --- TOOLBAR (EXCEL / DELETE) ---
   toolbar: {
     flexDirection: "row",
     paddingHorizontal: 16,
@@ -768,7 +789,6 @@ const styles = StyleSheet.create({
 
   controlsContainer: { paddingHorizontal: 16, marginBottom: 15 },
 
-  // --- SWITCH MEJORADO ---
   switchContainer: {
     flexDirection: "row",
     backgroundColor: "#e0e0e0",
@@ -818,7 +838,13 @@ const styles = StyleSheet.create({
     marginBottom: 8,
   },
   
-  // --- OVERLAY STYLES ---
+  // PANEL AGRO
+  agroPanel: { flexDirection: 'row', backgroundColor: '#fff', borderRadius: 16, padding: 15, elevation: 2, marginBottom: 25, marginHorizontal: 16, borderWidth: 1, borderColor: '#eee', justifyContent: 'space-between' },
+  agroItem: { flex: 1, alignItems: 'center' },
+  agroValue: { fontSize: 18, fontWeight: 'bold', color: Colors.textPrimary, marginVertical: 4 },
+  agroLabel: { fontSize: 11, fontWeight: 'bold', color: Colors.textSecondary },
+  dividerVertical: { width: 1, backgroundColor: '#eee', height: '80%', alignSelf: 'center' },
+  
   loadingOverlay: {
       flex: 1,
       backgroundColor: 'rgba(0,0,0,0.5)',
