@@ -115,27 +115,31 @@ export const useSDDownloader = () => {
 
         const chunk = Buffer.from(characteristic.value, 'base64').toString('utf-8');
 
-        if (chunk.startsWith("META:")) {
+        // 1. Detectar Metadata (Firmware envía "SIZE=12345")
+        if (chunk.startsWith("SIZE=") || chunk.startsWith("META:")) {
             const sizeMatch = chunk.match(/SIZE=(\d+)/);
             if (sizeMatch) fileSizeRef.current = parseInt(sizeMatch[1]);
             currentFileBuffer.current = ""; 
             lastProgressUpdate.current = 0;
+            console.log(`[SD] Inicio descarga. Tamaño: ${fileSizeRef.current}`);
         
-        } else if (chunk.includes("DONE")) {
+        // 2. Detectar Fin de Archivo (Firmware envía "EOF")
+        } else if (chunk.includes("EOF") || chunk.includes("DONE")) {
             if (activeResolver.current) {
                 if (watchdogTimer.current) clearTimeout(watchdogTimer.current);
                 activeResolver.current(currentFileBuffer.current.slice(0));
                 activeResolver.current = null;
             }
         
-        } else if (chunk.includes("ERR NOFILE")) {
+        } else if (chunk.includes("ERR") || chunk.includes("NOFILE")) {
+            console.warn("[SD] Error reportado por firmware:", chunk);
             if (activeResolver.current) {
                 if (watchdogTimer.current) clearTimeout(watchdogTimer.current);
                 activeResolver.current(null);
                 activeResolver.current = null;
             }
         
-        } else if (!chunk.startsWith("DATA_") && !chunk.startsWith("GET") && !chunk.startsWith("ERR")) {
+        } else {
             currentFileBuffer.current += chunk;
             
             const now = Date.now();
@@ -165,8 +169,8 @@ export const useSDDownloader = () => {
                  activeResolver.current = null;
              }
         }, 4000); 
-
-        const base64Cmd = Buffer.from(`GET ${filename}`).toString('base64');
+        const command = filename; 
+        const base64Cmd = Buffer.from(command).toString('base64');
         
         try {
             await device.writeCharacteristicWithResponseForService(
@@ -185,6 +189,8 @@ export const useSDDownloader = () => {
   // 4. PARSEADOR
   const parseFullFileContent = (fullText: string, sensorType: string) => {
     let cleanText = fullText
+        .replace(/SIZE=\d+/g, '')
+        .replace(/EOF/g, '')
         .replace(/META:.*?\n/g, '')
         .replace(/DATA_START\n?/g, '')
         .replace(/DATA_END\n?/g, '')
