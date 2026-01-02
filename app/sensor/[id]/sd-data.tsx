@@ -38,20 +38,14 @@ import { ElectrodeEntity, LinearSegment, SensorEntity } from '../../../database/
 // Utils
 import { TimeRange, useSDDownloader } from '../../../hooks/useSDDownloader';
 import { calculateMoistureFromSegments } from '../../../utils/calibration';
-import { calculateMedian, downsampleData } from '../../../utils/dataProcessing';
+// IMPORTANTE: Nuevas funciones importadas
+import { calculateMedian, downsampleData, fillTimeGaps, formatForExcel } from '../../../utils/dataProcessing';
 import { ChartReferenceLine, getAgronomicLines } from '../../../utils/referenceLines';
 
 type UnitType = '% Hv' | '% Hg' | 'mV';
 
-// --- HELPER PARA FECHAS LOCALES ---
-const toLocalISOString = (date: Date) => {
-  const tzOffset = date.getTimezoneOffset() * 60000;
-  const localTime = new Date(date.getTime() - tzOffset);
-  return localTime.toISOString().slice(0, -1);
-};
-
 // =====================================================================
-// COMPONENTE TARJETA EXPORTABLE (Corregido y Limpio)
+// COMPONENTE TARJETA EXPORTABLE
 // =====================================================================
 interface ExportableCardProps {
     title: string;
@@ -89,7 +83,6 @@ const ExportableChartCard = ({
                     result: 'tmpfile',
                 });
 
-                // Nombre de archivo descriptivo (ya que quitamos el footer visual)
                 const safeName = (sensorName || sensorId).replace(/[^a-zA-Z0-9]/g, '');
                 const safeTitle = title.replace(/[^a-zA-Z0-9]/g, '');
                 const safeDate = dateRangeLabel.replace(/\//g, '-').replace(/ /g, '_');
@@ -120,7 +113,6 @@ const ExportableChartCard = ({
 
     return (
         <View style={styles.chartCardContainer}>
-            {/* Header Externo: SOLO EL BOTÓN (Para no duplicar el título) */}
             <View style={styles.chartHeader}>
                 <View style={{flex: 1}} /> 
                 <TouchableOpacity 
@@ -132,31 +124,37 @@ const ExportableChartCard = ({
                 </TouchableOpacity>
             </View>
 
-            {/* Contenedor que se captura en la foto */}
             <View ref={viewRef} collapsable={false} style={styles.captureContainer}>
-                
-                {/* Título Interno (Limpio) */}
                 <View style={styles.innerHeader}>
                     <Text style={styles.chartTitle}>{title}</Text>
-                    {/* Subtítulo opcional, si no quieres nada de info extra, borra esta línea */}
                     <Text style={styles.sensorSubtitle}>{sensorName || sensorId}</Text>
                 </View>
                 
                 <StatPanel stats={stats} unit={unit} />
                 
                 <View style={{marginTop: 10, overflow: 'hidden'}}>
-                     <SensorChart 
+                      <SensorChart 
                         data={data} 
                         type="line" 
                         unit={unit} 
                         color={color} 
-                        spacing={60} // Espaciado fijo ancho para exportación
+                        spacing={60} 
                         referenceLines={referenceLines} 
                         yAxisMax={yAxisMax}
-                     />
+                      />
                 </View>
                 
-                {/* Footer eliminado visualmente para limpiar la interfaz */}
+                {/* Footer Visual en la foto */}
+                <View style={styles.cardFooter}>
+                    <View style={styles.footerRow}>
+                        <Text style={styles.footerLabel}>📍 Ubicación:</Text>
+                        <Text style={styles.footerValue}>{sensorLocation || 'N/A'}</Text>
+                    </View>
+                    <View style={styles.footerRow}>
+                        <Text style={styles.footerLabel}>📅 Datos del:</Text>
+                        <Text style={styles.footerValue}>{dateRangeLabel}</Text>
+                    </View>
+                </View>
             </View>
         </View>
     );
@@ -236,9 +234,19 @@ export default function SDDataScreen() {
       return `${fmt(minDate)} al ${fmt(maxDate)}`;
   };
 
+  // --- MODIFICADO PARA SOPORTAR PUNTOS INVISIBLES ---
   const formatForChart = (arr: any[], daysLoaded: number) => arr.map(p => {
+      if (p.hideDataPoint) {
+           return { 
+               value: p.value, 
+               label: "", 
+               hideDataPoint: true, 
+               dataPointRadius: 0, 
+               stripHeight: 0 
+           };
+      }
+
       const d = new Date(p.timestamp);
-      // Solo hora si son pocos días, sino fecha+hora
       let label = (daysLoaded <= 2) 
         ? d.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})
         : `${d.getDate()}/${d.getMonth()+1} ${d.getHours()}h`;
@@ -277,10 +285,25 @@ export default function SDDataScreen() {
     if (days > 20) intervalMs = 24 * 3600 * 1000; 
     else if (days > 3) intervalMs = 6 * 3600 * 1000; 
 
-    const prepare = (dataKey: string, arr: any[]) => ({
-        data: formatForChart(downsampleData(arr, dataKey, intervalMs), days),
-        stats: calculateStats(downsampleData(arr, dataKey, intervalMs))
-    });
+    // --- LOGICA DE GRILLA TEMPORAL ---
+    const timestamps = processedRaw.map(d => d.timestamp);
+    const minTs = Math.min(...timestamps);
+    const maxTs = Math.max(...timestamps);
+    const startDate = new Date(Math.floor(minTs / intervalMs) * intervalMs);
+    const endDate = new Date(Math.ceil(maxTs / intervalMs) * intervalMs);
+
+    const prepare = (dataKey: string, arr: any[]) => {
+        // 1. Reducción
+        const downsampled = downsampleData(arr, dataKey, intervalMs);
+        // 2. Stats (datos reales)
+        const stats = calculateStats(downsampled);
+        // 3. Relleno de Huecos (Unir puntos)
+        const filled = fillTimeGaps(downsampled, intervalMs, startDate, endDate);
+        // 4. Formato Gráfica
+        const data = formatForChart(filled, days);
+
+        return { data, stats };
+    };
 
     if (isB01) {
         setElectrodesData({
@@ -307,19 +330,26 @@ export default function SDDataScreen() {
       const data = await startDownload(connectedDevice, sensorDb.type, range, start, now);
       if (data && data.length > 0) {
           setDownloadedData(data); setBusyMessage(`Procesando ${data.length} registros...`);
-          setTimeout(() => { processVisualization(data); setIsBusy(false); }, 100);
+          
+          // --- PROCESAMIENTO INICIAL ---
+          setTimeout(() => { 
+              processVisualization(data); 
+              setIsBusy(false); 
+          }, 100);
       } else { setIsBusy(false); if (status !== 'error') Alert.alert("Aviso", "No se encontraron datos."); }
   };
 
   const handleCancel = () => { cancelDownload(); setIsBusy(false); };
 
+  // --- EXCEL CORREGIDO (24HS) ---
   const handleExportExcel = async () => {
     if (downloadedData.length === 0) { Alert.alert("Sin datos", "No hay datos."); return; }
     try {
         setIsBusy(true); setBusyMessage("Generando Excel...");
         const isB01 = sensorDb?.type === 'B01';
+        
         const dataToExport = downloadedData.map(item => {
-            const row: any = { "Fecha y Hora": new Date(item.timestamp).toLocaleString('es-AR') };
+            const row: any = { "Fecha y Hora": formatForExcel(item.timestamp) };
             const batMv = item.battery_mv || 0;
             row["Batería (%)"] = Math.round(Math.max(0, Math.min(100, ((batMv - 3300) / (4200 - 3300)) * 100)));
             if (isB01) {
@@ -335,6 +365,7 @@ export default function SDDataScreen() {
             } else { row["Temp. Aire (°C)"] = item.air_temp; row["Humedad Rel. (%)"] = item.humidity; }
             return row;
         });
+        
         const ws = XLSX.utils.json_to_sheet(dataToExport); ws['!cols'] = [{ wch: 22 }, { wch: 10 }, { wch: 15 }]; 
         const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, "Datos");
         const wbout = XLSX.write(wb, { type: 'base64', bookType: 'xlsx' });
@@ -344,35 +375,72 @@ export default function SDDataScreen() {
         await fs.writeAsStringAsync(uri, wbout, { encoding: 'base64' });
         setIsBusy(false);
         if (await Sharing.isAvailableAsync()) await Sharing.shareAsync(uri, { mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', dialogTitle: 'Exportar Excel', UTI: 'com.microsoft.excel.xlsx' });
-    } catch (e) { setIsBusy(false); Alert.alert("Error", "No se pudo generar el Excel."); }
+    } catch { setIsBusy(false); Alert.alert("Error", "No se pudo generar el Excel."); }
   };
 
+  // --- EFECTO CORREGIDO: Solo se dispara cuando CAMBIAN LAS UNIDADES ---
   useEffect(() => {
-      if (downloadedData.length > 0 && !isBusy) {
-          setIsBusy(true); setBusyMessage("Actualizando unidades...");
-          const timer = setTimeout(() => { processVisualization(downloadedData); setIsBusy(false); }, 50);
+      if (downloadedData.length > 0) {
+          // No ponemos loading aquí para evitar parpadeos molestos, solo reprocesamos
+          // Si quisieras loading, podrías poner setIsBusy(true) pero con cuidado.
+          // Para seguridad, lo hacemos síncrono o con un timeout muy corto sin bloquear
+          const timer = setTimeout(() => { 
+              processVisualization(downloadedData); 
+          }, 10);
           return () => clearTimeout(timer);
       }
-  }, [unit]); 
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [unit]); // <--- SOLO ESCUCHAMOS UNIDAD (y range indirectamente)
 
-  const handleSync = async () => {
+  // --- SYNC CORREGIDO (ISO) ---
+const handleSync = async () => {
     if (downloadedData.length === 0) return;
+    
     Alert.alert("Guardar", `Se procesarán ${downloadedData.length} registros.`, [
         { text: "Cancelar", style: "cancel" },
         { text: "Confirmar", onPress: async () => {
             setIsBusy(true); setBusyMessage("Guardando en base de datos...");
             try {
                 await new Promise(r => setTimeout(r, 100));
+
+                // --- LOGS DE DEPURACIÓN AQUÍ ---
+                console.log("💾 [SD SAVE] Iniciando guardado manual...");
+                console.log(`   👉 Sensor ID (URL): '${sensorId}'`);
+                
+                // Muestra el primer dato para ver qué ID trae el CSV
+                if (downloadedData.length > 0) {
+                    console.log(`   👉 Primer dato (CSV):`, JSON.stringify(downloadedData[0]));
+                    console.log(`   👉 ID en CSV: '${downloadedData[0].sensor_id}'`);
+                }
+                // ------------------------------
+
                 const dataToInsert = downloadedData.map(p => ({
-                    ...p, sensor_id: String(sensorId), timestamp: toLocalISOString(new Date(p.timestamp)), 
-                    is_synced: 0, updated_at: new Date().toISOString(), e1_hv: 0, e1_hg: 0, e2_hv: 0, e2_hg: 0, e3_hv: 0, e3_hg: 0,
+                    ...p, 
+                    // FORZAMOS EL ID LIMPIO DE LA URL, NO EL DEL CSV (Por si acaso el CSV trae basura)
+                    sensor_id: String(sensorId).trim(), 
+                    
+                    // ISO STANDARD
+                    timestamp: new Date(p.timestamp).toISOString(), 
+                    is_synced: 0, 
+                    updated_at: new Date().toISOString(), 
+                    e1_hv: 0, e1_hg: 0, e2_hv: 0, e2_hg: 0, e3_hv: 0, e3_hg: 0,
                 }));
+                
+                console.log(`   👉 ID Final enviado a DB: '${dataToInsert[0].sensor_id}'`);
+
                 let added = 0;
                 if (sensorDb?.type === 'B01') added = await insertReadingsB01(dataToInsert as any); 
                 else added = await insertReadingsC01(dataToInsert as any);
+                
+                console.log(`✅ [SD SAVE] Guardados ${added} registros.`);
+
                 setIsBusy(false);
                 Alert.alert("Éxito", `Agregados: ${added}. Nuevos.`, [{ text: "OK", onPress: () => { resetStatus(); setDownloadedData([]); if(router.canGoBack()) router.back(); }}]);
-            } catch(e) { setIsBusy(false); Alert.alert("Error DB", "No se pudo guardar la información."); }
+            } catch(e) { 
+                console.error("❌ [SD SAVE] Error:", e);
+                setIsBusy(false); 
+                Alert.alert("Error DB", "No se pudo guardar la información."); 
+            }
         }}
     ]);
   };
@@ -450,10 +518,7 @@ export default function SDDataScreen() {
                             />
                         )}
                         {[1, 2, 3].map((num) => {
-                            // Obtener Líneas Agronómicas
                             const refLines = getAgronomicLines(electrodesInfo[num], unit);
-                            
-                            // Calcular Techo
                             let maxY = undefined;
                             const satLine = refLines.find(l => l.label === 'SAT');
                             if (satLine && satLine.value > 0) maxY = satLine.value + 5; 
@@ -466,8 +531,8 @@ export default function SDDataScreen() {
                                     unit={unit} color={Colors.primary}
                                     sensorId={String(sensorId)} sensorName={sensorDb?.alias || ''} sensorLocation={sensorDb?.location || ''}
                                     dateRangeLabel={getDateRangeLabel()}
-                                    referenceLines={refLines} // Pasamos las líneas
-                                    yAxisMax={maxY} // Pasamos el techo
+                                    referenceLines={refLines} 
+                                    yAxisMax={maxY} 
                                 />
                             );
                         })}
@@ -603,5 +668,10 @@ const styles = StyleSheet.create({
       marginBottom: 10
   },
   chartTitle: { fontSize: 16, fontWeight: 'bold', color: Colors.textPrimary },
-  sensorSubtitle: { fontSize: 12, color: Colors.textSecondary, marginTop: 2 }
+  sensorSubtitle: { fontSize: 12, color: Colors.textSecondary, marginTop: 2 },
+  cardFooter: { marginTop: 10, paddingTop: 8, borderTopWidth: 1, borderTopColor: '#f0f0f0' },
+  footerRow: { flexDirection: 'row', marginBottom: 4, alignItems: 'center' },
+  footerLabel: { fontSize: 10, color: '#999', fontWeight: '600', width: 60 },
+  footerValue: { fontSize: 10, color: '#555', fontWeight: 'bold' },
+  footerTiny: { fontSize: 8, color: '#aaa', marginTop: 4, textAlign: 'right' }
 });

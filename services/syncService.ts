@@ -9,8 +9,6 @@ import {
 } from "../database/ElectrodeRepository";
 import { insertReadingsB01, insertReadingsC01 } from "../database/ReadingsRepository";
 import {
-    deleteSensor,
-    getAllSensors,
     getSensorsPendingSync,
     markSensorSynced,
     saveSensor,
@@ -22,11 +20,10 @@ import { supabase } from "../lib/supabase";
 
 const LAST_PULL_KEY = "LAST_SYNC_TIMESTAMP";
 
-// VARIABLE DE BLOQUEO (SEMÁFORO)
+// SEMÁFORO
 let isSyncing = false;
 
 export const syncService = {
-  // Verificación de conexión
   async isOnline(): Promise<boolean> {
     const state = await NetInfo.fetch();
     return (state.isConnected && state.isInternetReachable) || false;
@@ -43,13 +40,14 @@ export const syncService = {
         return;
     }
 
-    // A. SUBIR SENSORES PENDIENTES
+    // A. SUBIR SENSORES (Aquí SI actualizamos si ya existe, por si cambiaste el alias)
     try {
         const pendingSensors = await getSensorsPendingSync();
         if (pendingSensors.length > 0) {
             console.log(`📤 [SYNC] Subiendo ${pendingSensors.length} sensores...`);
             for (const sensor of pendingSensors) {
-                const cleanId = sensor.id.replace("SEN-", ""); 
+                const cleanId = sensor.id.replace("SEN-", "").trim(); 
+                
                 const { error } = await supabase.from("devices").upsert({
                     id: cleanId,
                     alias: sensor.alias,
@@ -60,23 +58,23 @@ export const syncService = {
                     lng: sensor.lng,
                     config: JSON.parse(sensor.config_json || "{}"),
                     last_sync: new Date().toISOString(),
-                });
+                }); // Sin ignoreDuplicates, para que actualice cambios
+
                 if (error) console.error(`❌ [SYNC] Error sensor ${cleanId}:`, error.message);
                 else await markSensorSynced(sensor.id);
             }
         }
     } catch (e) { console.error("❌ [SYNC] Error sensores:", e); }
 
-    // B. SUBIR ELECTRODOS PENDIENTES
+    // B. SUBIR ELECTRODOS (También actualizamos calibraciones)
     try {
         const pendingElectrodes = await db.getAllAsync<ElectrodeEntity>(
             "SELECT * FROM device_electrodes WHERE is_synced = 0"
         );
         if (pendingElectrodes.length > 0) {
-            console.log(`📤 [SYNC] Subiendo ${pendingElectrodes.length} calibraciones...`);
             const electrodesPayload = pendingElectrodes.map(elec => ({
                 id: elec.id,
-                device_id: elec.sensor_id.replace("SEN-", ""),
+                device_id: elec.sensor_id.replace("SEN-", "").trim(),
                 electrode_index: elec.electrode_index,
                 depth: elec.depth,
                 texture: elec.texture,
@@ -85,15 +83,89 @@ export const syncService = {
                 equations_json: JSON.parse(elec.equations_json || "[]"),
                 updated_at: new Date().toISOString()
             }));
+            
             const { error } = await supabase.from("device_electrodes").upsert(electrodesPayload);
-            if (error) {
-                console.error("❌ [SYNC] Error electrodos:", error.message);
-            } else {
+            if (!error) {
                 for (const elec of pendingElectrodes) await markElectrodeSynced(elec.id);
-                console.log(`✅ [SYNC] Electrodos subidos.`);
+            } else {
+                console.error("❌ [SYNC] Error electrodos:", error.message);
             }
         }
     } catch (e) { console.error("❌ [SYNC] Error electrodos:", e); }
+
+    // C. SUBIR LECTURAS B01 (SUELO) - OPTIMIZADO: IGNORAR DUPLICADOS
+    try {
+        const pendingReadings = await db.getAllAsync<ReadingB01>(
+            "SELECT * FROM readings_b01 WHERE is_synced = 0 LIMIT 50"
+        );
+        
+        if (pendingReadings.length > 0) {
+            console.log(`📤 [SYNC] Subiendo ${pendingReadings.length} lecturas B01...`);
+            
+            const payload = pendingReadings.map(r => {
+                const cleanId = r.sensor_id.replace("SEN-", "").trim();
+                return {
+                    device_id: cleanId,
+                    sensor_id: cleanId,
+                    sensor_type: 'B01',
+                    timestamp: r.timestamp, 
+                    soil_temp: r.soil_temp,
+                    e1_mv: r.e1_mv, e2_mv: r.e2_mv, e3_mv: r.e3_mv,
+                    battery_mv: r.battery_mv
+                };
+            });
+
+            const { error } = await supabase.from('readings_b01').upsert(payload, { 
+                // CAMBIO AQUÍ: Usamos sensor_id en lugar de device_id
+                onConflict: 'sensor_id, timestamp', 
+                ignoreDuplicates: true 
+            });
+            
+            if (!error) {
+                const ids = pendingReadings.map(r => r.id).join(',');
+                await db.runAsync(`UPDATE readings_b01 SET is_synced = 1 WHERE id IN (${ids})`);
+                console.log("✅ [SYNC] Lecturas B01 procesadas (Duplicados ignorados).");
+            } else {
+                console.error("❌ [SYNC] Error subiendo B01:", error.message);
+            }
+        }
+    } catch (e) { console.error("❌ [SYNC] Error lecturas B01:", e); }
+
+    // D. SUBIR LECTURAS C01 (CLIMA) - OPTIMIZADO: IGNORAR DUPLICADOS
+    try {
+        const pendingReadings = await db.getAllAsync<ReadingC01>(
+            "SELECT * FROM readings_c01 WHERE is_synced = 0 LIMIT 50"
+        );
+        
+        if (pendingReadings.length > 0) {
+            const payload = pendingReadings.map(r => {
+                const cleanId = r.sensor_id.replace("SEN-", "").trim();
+                return {
+                    device_id: cleanId,
+                    sensor_id: cleanId,
+                    sensor_type: 'C01',
+                    timestamp: r.timestamp,
+                    air_temp: r.air_temp,
+                    humidity: r.humidity,
+                    battery_mv: r.battery_mv
+                };
+            });
+
+            const { error } = await supabase.from('readings_c01').upsert(payload, {
+                // CAMBIO AQUÍ: Usamos sensor_id en lugar de device_id
+                onConflict: 'sensor_id, timestamp',
+                ignoreDuplicates: true
+            });
+            
+            if (!error) {
+                const ids = pendingReadings.map(r => r.id).join(',');
+                await db.runAsync(`UPDATE readings_c01 SET is_synced = 1 WHERE id IN (${ids})`);
+                console.log("✅ [SYNC] Lecturas C01 procesadas (Duplicados ignorados).");
+            } else {
+                console.error("❌ [SYNC] Error subiendo C01:", error.message);
+            }
+        }
+    } catch (e) { console.error("❌ [SYNC] Error lecturas C01:", e); }
   },
 
   // ==============================================================================
@@ -104,18 +176,16 @@ export const syncService = {
     console.log("🔄 [SYNC] Iniciando PULL completo...");
 
     try {
-        // A. Bajar Dispositivos
         const { data: remoteDevices, error: devErr } = await supabase.from("devices").select("*");
-        if (devErr) throw devErr;
-        if (!remoteDevices) return;
+        
+        if (devErr) { console.error("❌ [SYNC] Error bajando devices:", devErr.message); return; }
+        if (!remoteDevices || remoteDevices.length === 0) return; 
 
-        const allowedIds = remoteDevices.map((d) => d.id);
         const now = new Date().toISOString();
 
         for (const remote of remoteDevices) {
-            const localSensorId = remote.id; 
+            const localSensorId = remote.id.trim();
 
-            // 1. Guardar Sensor Local
             const localSensor: SensorEntity = {
                 id: localSensorId,
                 alias: remote.alias,
@@ -125,12 +195,11 @@ export const syncService = {
                 lat: remote.lat,
                 lng: remote.lng,
                 config_json: JSON.stringify(remote.config),
-                is_synced: 1,
+                is_synced: 1, 
                 updated_at: remote.created_at || now,
             };
             await saveSensor(localSensor, true);
 
-            // 2. Bajar Electrodos
             const { data: remoteElecs } = await supabase
                 .from("device_electrodes")
                 .select("*")
@@ -153,15 +222,13 @@ export const syncService = {
                     await saveElectrode(localElec);
                 }
             }
-
-            // 3. BAJAR ÚLTIMA LECTURA
-            console.log(`⬇️ [SYNC] Bajando último dato para ${remote.id} (${remote.type})...`);
             
+            // 3. BAJAR ÚLTIMA LECTURA
             if (remote.type === 'B01') {
                 const { data: readings } = await supabase
                     .from('readings_b01')
                     .select('*')
-                    .eq('sensor_id', remote.id) 
+                    .eq('device_id', remote.id) 
                     .order('timestamp', { ascending: false })
                     .limit(1);
 
@@ -172,13 +239,12 @@ export const syncService = {
                         is_synced: 1
                     }));
                     await insertReadingsB01(mappedReadings as ReadingB01[]);
-                    console.log(`   ✅ Último B01 guardado: ${readings[0].timestamp}`);
                 }
             } else if (remote.type === 'C01') {
                 const { data: readings } = await supabase
                     .from('readings_c01')
                     .select('*')
-                    .eq('sensor_id', remote.id)
+                    .eq('device_id', remote.id)
                     .order('timestamp', { ascending: false })
                     .limit(1);
 
@@ -189,42 +255,29 @@ export const syncService = {
                         is_synced: 1
                     }));
                     await insertReadingsC01(mappedReadings as ReadingC01[]);
-                    console.log(`   ✅ Último C01 guardado: ${readings[0].timestamp}`);
                 }
-            }
-        }
-
-        // C. Limpieza
-        const allLocal = await getAllSensors();
-        for (const local of allLocal) {
-            if (local.is_synced === 1 && !allowedIds.includes(local.id)) {
-                await deleteSensor(local.id);
             }
         }
 
         await AsyncStorage.setItem(LAST_PULL_KEY, now);
         
     } catch (error: any) {
-        console.error("❌ [SYNC] Error en Pull:", error.message);
+        console.error("❌ [SYNC] Error crítico en Pull:", error.message);
     }
   },
 
-  // 3. SYNC ALL (CON SEMÁFORO PARA EVITAR DOBLE EJECUCIÓN)
+  // 3. SYNC ALL
   async syncAll() {
-    if (isSyncing) {
-        console.log("⏳ [SYNC] Sincronización ya en curso. Ignorando llamada duplicada.");
-        return;
-    }
-
+    if (isSyncing) return;
     try {
-      isSyncing = true; // BLOQUEAR
-      await this.pushChanges();
-      await this.pullChanges();
-      console.log("✨ [SYNC] Sincronización Global Finalizada");
+        isSyncing = true;
+        await this.pushChanges();
+        await this.pullChanges();
+        console.log("✨ [SYNC] Sincronización Global Finalizada");
     } catch (e) {
-      console.error("❌ [SYNC] Error crítico en syncAll:", e);
+        console.error("❌ [SYNC] Error crítico en syncAll:", e);
     } finally {
-      isSyncing = false; // LIBERAR SIEMPRE
+        isSyncing = false;
     }
   },
 };

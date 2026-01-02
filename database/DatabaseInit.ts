@@ -1,8 +1,8 @@
 import * as SQLite from "expo-sqlite";
 
 // Abrir la base de datos de forma síncrona
-// AL CAMBIAR EL NOMBRE A V4, FORZAMOS UNA DB NUEVA Y LIMPIA CON LA NUEVA ESTRUCTURA
-export const db = SQLite.openDatabaseSync("agrosense_V4.db");
+// AL CAMBIAR EL NOMBRE A V6, FORZAMOS UNA DB NUEVA Y LIMPIA CON LA NUEVA ESTRUCTURA
+export const db = SQLite.openDatabaseSync("agrosense_V6.db");
 
 export const initDatabase = async () => {
   try {
@@ -62,7 +62,7 @@ export const initDatabase = async () => {
       );
       
       -- Índices para búsqueda rápida y sincronización eficiente
-      CREATE INDEX IF NOT EXISTS idx_b01_sensor_time ON readings_b01 (sensor_id, timestamp);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_b01_unique ON readings_b01 (sensor_id, timestamp);
       CREATE INDEX IF NOT EXISTS idx_b01_synced ON readings_b01 (is_synced);
     `);
 
@@ -83,6 +83,8 @@ export const initDatabase = async () => {
         FOREIGN KEY (sensor_id) REFERENCES sensors (id) ON DELETE CASCADE
       );
       
+      -- Índices para búsqueda rápida y sincronización eficiente
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_c01_unique ON readings_c01 (sensor_id, timestamp);
       CREATE INDEX IF NOT EXISTS idx_c01_synced ON readings_c01 (is_synced);
     `);
 
@@ -108,7 +110,7 @@ export const initDatabase = async () => {
       );
     `);
 
-    console.log("[DB] Inicialización completada. Sistema listo (V4).");
+    console.log("[DB] Inicialización completada. Sistema listo (V6).");
   } catch (error) {
     console.error("[DB] ❌ Error fatal iniciando BD:", error);
   }

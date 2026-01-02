@@ -5,9 +5,11 @@ import {
   ActivityIndicator,
   Alert,
   InteractionManager,
+  Keyboard,
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   TouchableOpacity,
   View
 } from 'react-native';
@@ -21,154 +23,147 @@ import { captureRef } from 'react-native-view-shot';
 import * as XLSX from 'xlsx';
 
 // Componentes
+import SegmentedControl from '../../../components/global/SegmentedControl';
 import SensorChart from '../../../components/sensor/SensorChart';
 import StatPanel from '../../../components/sensor/StatPanel';
 import { Colors } from '../../../constants/Colors';
 
 // Lógica
 import { useBle } from '../../../context/BleContext';
-import { insertReadingsC01 } from '../../../database/ReadingsRepository';
+import { getElectrodesBySensor } from '../../../database/ElectrodeRepository';
+import { insertReadingsB01, insertReadingsC01 } from '../../../database/ReadingsRepository';
 import { getSensorById } from '../../../database/SensorRepository';
-import { SensorEntity } from '../../../database/types';
+import { ElectrodeEntity, LinearSegment, SensorEntity } from '../../../database/types';
 
 // Utils
-import { useSDDownloader } from '../../../hooks/useSDDownloader';
-import { downsampleData } from '../../../utils/dataProcessing';
+import { TimeRange, useSDDownloader } from '../../../hooks/useSDDownloader';
+import { calculateMoistureFromSegments } from '../../../utils/calibration';
+// IMPORTANTE: Agregamos fillTimeGaps y formatForExcel
+import { calculateMedian, downsampleData, fillTimeGaps, formatForExcel } from '../../../utils/dataProcessing';
+import { ChartReferenceLine, getAgronomicLines } from '../../../utils/referenceLines';
 
-// Definimos el tipo localmente para evitar conflictos con el del Hook general
-type ClimateTimeRange = '12h' | '1D' | '7D' | '1M' | '1A';
-
-// --- CONSTANTES AGRONÓMICAS ---
-const CLIMATE_LINES = [
-  { value: 0, label: 'Helada', color: '#4FC3F7' },     // Azul claro
-  { value: 7.2, label: 'Hora Frío', color: '#1E88E5' }, // Azul medio
-  { value: 35, label: 'Calor Ext.', color: '#FF7043' }  // Naranja
-];
-
-// --- HELPER PARA FECHAS LOCALES ---
-const toLocalISOString = (date: Date) => {
-  const tzOffset = date.getTimezoneOffset() * 60000;
-  const localTime = new Date(date.getTime() - tzOffset);
-  return localTime.toISOString().slice(0, -1);
-};
+type UnitType = '% Hv' | '% Hg' | 'mV';
 
 // =====================================================================
 // COMPONENTE TARJETA EXPORTABLE
 // =====================================================================
 interface ExportableCardProps {
-  title: string;
-  stats: any;
-  data: any[];
-  unit: string;
-  color: string;
-  sensorId: string;
-  sensorName: string;
-  sensorLocation: string;
-  dateRangeLabel: string;
-  type?: 'line' | 'bar';
-  referenceLines?: any[];
+    title: string;
+    stats: any;
+    data: any[];
+    unit: string;
+    color: string;
+    sensorId: string;
+    sensorName: string;
+    sensorLocation: string;
+    dateRangeLabel: string;
+    referenceLines?: ChartReferenceLine[];
+    yAxisMax?: number;
 }
 
 const ExportableChartCard = ({ 
-  title, stats, data, unit, color, sensorId, sensorName, sensorLocation, dateRangeLabel, 
-  type = 'line', referenceLines = []
+    title, stats, data, unit, color, sensorId, sensorName, sensorLocation, dateRangeLabel, 
+    referenceLines = [], yAxisMax
 }: ExportableCardProps) => {
-  const viewRef = useRef<View>(null);
-  const [saving, setSaving] = useState(false);
+    const viewRef = useRef<View>(null);
+    const [saving, setSaving] = useState(false);
 
-  const handleCapture = async () => {
-    if (saving) return;
-    setSaving(true);
+    const handleCapture = async () => {
+        if (saving) return;
+        setSaving(true);
 
-    InteractionManager.runAfterInteractions(async () => {
-      try {
-        await new Promise(r => setTimeout(r, 200));
-        if (!viewRef.current) throw new Error("Vista no montada");
+        InteractionManager.runAfterInteractions(async () => {
+            try {
+                await new Promise(r => setTimeout(r, 200));
+                if (!viewRef.current) throw new Error("Vista no montada");
 
-        const uri = await captureRef(viewRef, {
-          format: 'png', quality: 1, result: 'tmpfile',
+                const uri = await captureRef(viewRef, {
+                    format: 'png',
+                    quality: 1,
+                    result: 'tmpfile',
+                });
+
+                const safeName = (sensorName || sensorId).replace(/[^a-zA-Z0-9]/g, '');
+                const safeTitle = title.replace(/[^a-zA-Z0-9]/g, '');
+                const safeDate = dateRangeLabel.replace(/\//g, '-').replace(/ /g, '_');
+                const fileName = `${safeName}_${safeTitle}_${safeDate}.png`;
+                
+                // @ts-ignore
+                const fs = FileSystem;
+                const newPath = (fs.documentDirectory || fs.cacheDirectory) + fileName;
+
+                await fs.moveAsync({ from: uri, to: newPath });
+
+                if (await Sharing.isAvailableAsync()) {
+                    await Sharing.shareAsync(newPath, {
+                        mimeType: 'image/png',
+                        dialogTitle: `Gráfico ${title}`
+                    });
+                } else {
+                    Alert.alert("Guardado", "Imagen guardada.");
+                }
+            } catch (e) {
+                console.error("Error al capturar:", e);
+                Alert.alert("Error", "No se pudo guardar la imagen.");
+            } finally {
+                setSaving(false);
+            }
         });
+    };
 
-        const cleanTitle = title.replace(/[^a-zA-Z0-9]/g, '_');
-        const fileName = `${sensorId}_${cleanTitle}_${Date.now()}.png`;
-        
-        // @ts-ignore
-        const fs = FileSystem;
-        const newPath = (fs.documentDirectory || fs.cacheDirectory) + fileName;
-
-        await fs.moveAsync({ from: uri, to: newPath });
-
-        if (await Sharing.isAvailableAsync()) {
-          await Sharing.shareAsync(newPath, {
-            mimeType: 'image/png',
-            dialogTitle: `Gráfico ${title}`
-          });
-        } else {
-          Alert.alert("Guardado", "Imagen guardada.");
-        }
-      } catch (e) {
-        console.error("Error al capturar:", e);
-        Alert.alert("Error", "No se pudo guardar la imagen.");
-      } finally {
-        setSaving(false);
-      }
-    });
-  };
-
-  return (
-    <View style={styles.chartCardContainer}>
-      <View style={styles.chartHeader}>
-        <View style={{flex: 1}} /> 
-        <TouchableOpacity 
-          style={styles.miniExportButton} 
-          onPress={handleCapture}
-          disabled={saving}
-        >
-          {saving ? <ActivityIndicator size="small" color={Colors.primary} /> : <MaterialCommunityIcons name="camera-outline" size={22} color={Colors.textSecondary} />}
-        </TouchableOpacity>
-      </View>
-
-      <View ref={viewRef} collapsable={false} style={styles.captureContainer}>
-        <View style={styles.innerHeader}>
-          <Text style={styles.chartTitle}>{title}</Text>
-          <Text style={styles.sensorSubtitle}>{sensorName || sensorId}</Text>
-        </View>
-        
-        <StatPanel stats={stats} unit={unit} />
-        
-        <View style={{marginTop: 10, overflow: 'hidden'}}>
-           <SensorChart 
-             data={data} 
-             type={type} 
-             unit={unit} 
-             color={color} 
-             spacing={type === 'bar' ? 40 : 60} 
-             referenceLines={referenceLines}
-           />
-        </View>
-        
-        <View style={styles.cardFooter}>
-            <View style={styles.footerRow}>
-                <Text style={styles.footerLabel}>📍 Ubicación:</Text>
-                <Text style={styles.footerValue}>{sensorLocation || 'N/A'}</Text>
+    return (
+        <View style={styles.chartCardContainer}>
+            <View style={styles.chartHeader}>
+                <View style={{flex: 1}} /> 
+                <TouchableOpacity 
+                    style={styles.miniExportButton} 
+                    onPress={handleCapture}
+                    disabled={saving}
+                >
+                    {saving ? <ActivityIndicator size="small" color={Colors.primary} /> : <MaterialCommunityIcons name="camera-outline" size={22} color={Colors.textSecondary} />}
+                </TouchableOpacity>
             </View>
-            <View style={styles.footerRow}>
-                <Text style={styles.footerLabel}>📅 Datos del:</Text>
-                <Text style={styles.footerValue}>{dateRangeLabel}</Text>
+
+            <View ref={viewRef} collapsable={false} style={styles.captureContainer}>
+                <View style={styles.innerHeader}>
+                    <Text style={styles.chartTitle}>{title}</Text>
+                    <Text style={styles.sensorSubtitle}>{sensorName || sensorId}</Text>
+                </View>
+                
+                <StatPanel stats={stats} unit={unit} />
+                
+                <View style={{marginTop: 10, overflow: 'hidden'}}>
+                      <SensorChart 
+                        data={data} 
+                        type="line" 
+                        unit={unit} 
+                        color={color} 
+                        spacing={60}
+                        referenceLines={referenceLines} 
+                        yAxisMax={yAxisMax}
+                      />
+                </View>
+                
+                {/* Footer simple para la captura */}
+                <View style={styles.cardFooter}>
+                    <View style={styles.footerRow}>
+                        <Text style={styles.footerLabel}>📍 Ubicación:</Text>
+                        <Text style={styles.footerValue}>{sensorLocation || 'N/A'}</Text>
+                    </View>
+                    <View style={styles.footerRow}>
+                        <Text style={styles.footerLabel}>📅 Datos del:</Text>
+                        <Text style={styles.footerValue}>{dateRangeLabel}</Text>
+                    </View>
+                </View>
             </View>
-            <Text style={styles.footerTiny}>
-                Generado el {new Date().toLocaleDateString('es-AR')} a las {new Date().toLocaleTimeString('es-AR')}
-            </Text>
         </View>
-      </View>
-    </View>
-  );
+    );
 };
 
 // =====================================================================
-// PANTALLA PRINCIPAL CLIMA
+// PANTALLA PRINCIPAL
 // =====================================================================
-export default function SDDataClimateScreen() {
+export default function SDDataScreen() {
   const { id } = useLocalSearchParams();
   const sensorId = Array.isArray(id) ? id[0] : id;
   const insets = useSafeAreaInsets();
@@ -180,24 +175,49 @@ export default function SDDataClimateScreen() {
     fileProgress, totalFiles, filesProcessed, resetStatus 
   } = useSDDownloader();
 
-  // Estados con el tipo local correcto
-  const [range, setRange] = useState<ClimateTimeRange>('1D'); 
+  // Estados
+  const [range, setRange] = useState<TimeRange>('Hoy');
+  const [unit, setUnit] = useState<UnitType>('% Hv');
+  const [customDays, setCustomDays] = useState('3'); 
   const [isBusy, setIsBusy] = useState(false);
   const [busyMessage, setBusyMessage] = useState('');
 
   // Datos
   const [sensorDb, setSensorDb] = useState<SensorEntity | null>(null);
+  const [electrodesInfo, setElectrodesInfo] = useState<Record<number, ElectrodeEntity>>({});
+  const [electrodeConfig, setElectrodeConfig] = useState<Record<number, LinearSegment[]>>({});
+  const [densities, setDensities] = useState<Record<number, number>>({});
   const [downloadedData, setDownloadedData] = useState<any[]>([]); 
   
   // Gráficas
+  const [electrodesData, setElectrodesData] = useState<any>(null);
+  const [soilTempData, setSoilTempData] = useState<any>(null); 
   const [climateChartData, setClimateChartData] = useState<any>(null);
-  const [agroStats, setAgroStats] = useState({ chillHours: 0, frostHours: 0, heatStressHours: 0 });
 
   // Inicialización
   useEffect(() => {
     const init = async () => {
       const s = await getSensorById(sensorId);
       setSensorDb(s);
+      if (s?.type === 'B01') {
+          const elecs = await getElectrodesBySensor(sensorId);
+          
+          const infoMap: Record<number, ElectrodeEntity> = {};
+          const configMap: Record<number, LinearSegment[]> = {};
+          const densityMap: Record<number, number> = {};
+          
+          elecs.forEach(e => {
+             infoMap[e.electrode_index] = e;
+             if (e.equations_json) {
+                 try { configMap[e.electrode_index] = JSON.parse(e.equations_json); } catch {}
+             }
+             densityMap[e.electrode_index] = e.density && e.density > 0 ? e.density : 1.3;
+          });
+          
+          setElectrodesInfo(infoMap);
+          setElectrodeConfig(configMap);
+          setDensities(densityMap);
+      }
     };
     init();
     return () => resetStatus();
@@ -215,6 +235,17 @@ export default function SDDataClimateScreen() {
   };
 
   const formatForChart = (arr: any[], daysLoaded: number) => arr.map(p => {
+      // Manejo de puntos ocultos (para relleno de huecos)
+      if (p.hideDataPoint) {
+           return { 
+               value: p.value, 
+               label: "", 
+               hideDataPoint: true, 
+               dataPointRadius: 0, 
+               stripHeight: 0 
+           };
+      }
+
       const d = new Date(p.timestamp);
       let label = (daysLoaded <= 2) 
         ? d.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})
@@ -225,138 +256,147 @@ export default function SDDataClimateScreen() {
   const calculateStats = (arr: any[]) => {
     if (!arr.length) return { min: 0, max: 0, avg: 0 };
     const vals = arr.map(d => d.value);
-    const avg = vals.reduce((a, b) => a + b, 0) / vals.length;
-    return { min: Math.min(...vals), max: Math.max(...vals), avg }; 
-  };
-
-  // Cálculo de indicadores agronómicos
-  const calculateAgro = (rawData: any[]) => {
-     let chill = 0;
-     let frost = 0;
-     let heat = 0;
-     
-     for (let i = 1; i < rawData.length; i++) {
-        const t1 = new Date(rawData[i-1].timestamp).getTime();
-        const t2 = new Date(rawData[i].timestamp).getTime();
-        const hours = (t2 - t1) / 3600000; // Diferencia en horas
-        
-        if (hours > 24) continue;
-
-        const temp = rawData[i].air_temp;
-        
-        if (temp > 0 && temp <= 7.2) chill += hours;
-        if (temp <= 0) frost += hours;
-        if (temp >= 35) heat += hours;
-     }
-     
-     return { chillHours: chill, frostHours: frost, heatStressHours: heat };
+    return { min: Math.min(...vals), max: Math.max(...vals), avg: calculateMedian(vals) }; 
   };
 
   // Procesamiento
   const processVisualization = useCallback((rawData: any[]) => {
     if (!sensorDb) return;
+    const isB01 = sensorDb.type === 'B01';
     
-    const processedRaw = rawData.map(d => ({ 
-        timestamp: d.timestamp,
-        air_temp: d.air_temp,
-        humidity: d.humidity
-    }));
+    // 1. Calcular valores físicos (Humedad/Temp)
+    const processedRaw = rawData.map(d => {
+        let v1 = d.e1_mv, v2 = d.e2_mv, v3 = d.e3_mv;
+        if (isB01 && unit !== 'mV') {
+            const rho1 = densities[1] || 1.3;
+            const rho2 = densities[2] || 1.3;
+            const rho3 = densities[3] || 1.3;
 
-    // Lógica corregida para los tipos de ClimateTimeRange
-    let days = 1;
-    if (range === '7D') days = 7;
-    if (range === '1M') days = 30;
-    if (range === '1A') days = 365;
-
-    let intervalMs = 3600 * 1000; // 1h default
-    if (days > 20) intervalMs = 24 * 3600 * 1000; // Diario si es > 20 días
-    else if (days > 3) intervalMs = 6 * 3600 * 1000; // Cada 6h si es > 3 días
-
-    const prepare = (dataKey: string) => ({
-        data: formatForChart(downsampleData(processedRaw, dataKey, intervalMs), days),
-        stats: calculateStats(downsampleData(processedRaw, dataKey, intervalMs))
+            if (electrodeConfig[1]) v1 = calculateMoistureFromSegments(d.e1_mv, electrodeConfig[1]);
+            if (electrodeConfig[2]) v2 = calculateMoistureFromSegments(d.e2_mv, electrodeConfig[2]);
+            if (electrodeConfig[3]) v3 = calculateMoistureFromSegments(d.e3_mv, electrodeConfig[3]);
+            
+            if (unit === '% Hg') { v1/=rho1; v2/=rho2; v3/=rho3; }
+        }
+        return { ...d, v1, v2, v3 };
     });
 
-    setClimateChartData({
-        temp: prepare('air_temp'),
-        hum: prepare('humidity'),
-    });
+    // 2. Configurar Intervalos
+    const days = range === 'Custom' ? (parseInt(customDays) || 1) : (range === '30D' ? 30 : range === '7D' ? 7 : 1);
+    let intervalMs = 3600 * 1000; 
+    if (days > 20) intervalMs = 24 * 3600 * 1000; 
+    else if (days > 3) intervalMs = 6 * 3600 * 1000; 
 
-    setAgroStats(calculateAgro(processedRaw));
+    // 3. Determinar Inicio y Fin REALES de los datos (para alinear la grilla)
+    const timestamps = processedRaw.map(d => d.timestamp);
+    const minTs = Math.min(...timestamps);
+    const maxTs = Math.max(...timestamps);
+    const startDate = new Date(Math.floor(minTs / intervalMs) * intervalMs);
+    const endDate = new Date(Math.ceil(maxTs / intervalMs) * intervalMs);
 
-  }, [sensorDb, range]); 
+    const prepare = (dataKey: string, arr: any[]) => {
+        // A. Reducción
+        const downsampled = downsampleData(arr, dataKey, intervalMs);
+        // B. Stats
+        const stats = calculateStats(downsampled);
+        
+        // C. RELLENO DE HUECOS (Tu requerimiento: unir puntos suavemente)
+        // Usamos fillTimeGaps que ahora tiene lógica para no inventar datos fuera de rango
+        const filled = fillTimeGaps(downsampled, intervalMs, startDate, endDate);
+        
+        // D. Formato final
+        const data = formatForChart(filled, days);
+
+        return { data, stats };
+    };
+
+    if (isB01) {
+        setElectrodesData({
+            1: prepare('v1', processedRaw),
+            2: prepare('v2', processedRaw),
+            3: prepare('v3', processedRaw),
+        });
+        setSoilTempData(prepare('soil_temp', processedRaw));
+    } else {
+        setClimateChartData({
+            temp: prepare('air_temp', processedRaw),
+            hum: prepare('humidity', processedRaw),
+        });
+    }
+  }, [sensorDb, unit, electrodeConfig, densities, range, customDays]); 
 
   // Acciones
   const handleStartDownload = async () => {
+      Keyboard.dismiss(); 
       if (!connectedDevice || !sensorDb) { Alert.alert("Error", "Sensor no conectado."); return; }
       setIsBusy(true); setBusyMessage("Iniciando descarga...");
-      
-      const now = new Date(); 
-      let start = new Date();
-      
-      // Definir fecha inicio según ClimateTimeRange
-      if (range === '12h') start.setHours(now.getHours() - 12);
-      else if (range === '1D') start.setDate(now.getDate() - 1);
-      else if (range === '7D') start.setDate(now.getDate() - 7);
-      else if (range === '1M') start.setMonth(now.getMonth() - 1);
-      else if (range === '1A') start.setFullYear(now.getFullYear() - 1);
-
-      // Usamos 'Custom' internamente para el hook (que espera el tipo del hook, no el nuestro local)
-      const data = await startDownload(connectedDevice, sensorDb.type, 'Custom', start, now);
-      
+      const now = new Date(); let start = new Date();
+      if (range === 'Custom') { const daysToSubtract = parseInt(customDays) || 1; start.setDate(now.getDate() - daysToSubtract); }
+      const data = await startDownload(connectedDevice, sensorDb.type, range, start, now);
       if (data && data.length > 0) {
           setDownloadedData(data); setBusyMessage(`Procesando ${data.length} registros...`);
           setTimeout(() => { processVisualization(data); setIsBusy(false); }, 100);
-      } else { 
-          setIsBusy(false); 
-          if (status !== 'error') Alert.alert("Aviso", "No se encontraron datos en ese rango."); 
-      }
+      } else { setIsBusy(false); if (status !== 'error') Alert.alert("Aviso", "No se encontraron datos."); }
   };
 
   const handleCancel = () => { cancelDownload(); setIsBusy(false); };
 
+  // --- EXCEL CORREGIDO (Fecha 24hs) ---
   const handleExportExcel = async () => {
     if (downloadedData.length === 0) { Alert.alert("Sin datos", "No hay datos."); return; }
     try {
         setIsBusy(true); setBusyMessage("Generando Excel...");
-        const dataToExport = downloadedData.map(item => {
-            const temp = item.air_temp;
-            return {
-                "Fecha y Hora": new Date(item.timestamp).toLocaleString('es-AR'),
-                "Temp. Aire (°C)": temp,
-                "Humedad Rel. (%)": item.humidity,
-                "Hora Frío?": (temp > 0 && temp <= 7.2) ? "SÍ" : "NO",
-                "Helada?": (temp <= 0) ? "SÍ" : "NO",
-                "Batería (mV)": item.battery_mv || 0
-            };
-        });
-
-        const ws = XLSX.utils.json_to_sheet(dataToExport); 
-        const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, "Clima");
-        const wbout = XLSX.write(wb, { type: 'base64', bookType: 'xlsx' });
+        const isB01 = sensorDb?.type === 'B01';
         
+        const dataToExport = downloadedData.map(item => {
+            // FORMATO FECHA CORRECTO
+            const row: any = { "Fecha y Hora": formatForExcel(item.timestamp) };
+            
+            const batMv = item.battery_mv || 0;
+            row["Batería (%)"] = Math.round(Math.max(0, Math.min(100, ((batMv - 3300) / (4200 - 3300)) * 100)));
+            if (isB01) {
+                row["Temp. Suelo (°C)"] = item.soil_temp;
+                [1, 2, 3].forEach(idx => {
+                    const mv = item[`e${idx}_mv`]; row[`E${idx} (mV)`] = mv;
+                    const segs = electrodeConfig[idx]; let hv = 0;
+                    if (segs && segs.length > 0) hv = calculateMoistureFromSegments(mv, segs);
+                    row[`E${idx} Hv (%)`] = Number(hv.toFixed(2));
+                    const rho = densities[idx] || 1.3; const hg = hv / rho;
+                    row[`E${idx} Hg (%)`] = Number(hg.toFixed(2));
+                });
+            } else { 
+                row["Temp. Aire (°C)"] = item.air_temp; 
+                row["Humedad Rel. (%)"] = item.humidity; 
+            }
+            return row;
+        });
+        
+        const ws = XLSX.utils.json_to_sheet(dataToExport); ws['!cols'] = [{ wch: 22 }, { wch: 10 }, { wch: 15 }]; 
+        const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, "Datos");
+        const wbout = XLSX.write(wb, { type: 'base64', bookType: 'xlsx' });
         // @ts-ignore
         const fs = FileSystem; const dir = fs.documentDirectory || fs.cacheDirectory;
-        const uri = dir + `Clima_${sensorId}_${range}.xlsx`;
+        const uri = dir + `Sensor_${sensorId}_${new Date().toISOString().slice(0,10)}.xlsx`;
         await fs.writeAsStringAsync(uri, wbout, { encoding: 'base64' });
-        
         setIsBusy(false);
-        if (await Sharing.isAvailableAsync()) {
-            await Sharing.shareAsync(uri, { 
-                mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 
-                dialogTitle: 'Exportar Clima', 
-                UTI: 'com.microsoft.excel.xlsx' 
-            });
-        }
-    } catch (_) { 
-        setIsBusy(false); 
-        Alert.alert("Error", "No se pudo generar el Excel."); 
-    }
+        if (await Sharing.isAvailableAsync()) await Sharing.shareAsync(uri, { mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', dialogTitle: 'Exportar Excel', UTI: 'com.microsoft.excel.xlsx' });
+    } catch { setIsBusy(false); Alert.alert("Error", "No se pudo generar el Excel."); }
   };
 
+  // --- EFECTO CORREGIDO (Sin bucles) ---
+  useEffect(() => {
+      if (downloadedData.length > 0 && !isBusy) {
+          setIsBusy(true); setBusyMessage("Actualizando unidades...");
+          const timer = setTimeout(() => { processVisualization(downloadedData); setIsBusy(false); }, 50);
+          return () => clearTimeout(timer);
+      }
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [unit, downloadedData, processVisualization]); 
+
+  // --- SYNC CORREGIDO (ISO Strings) ---
   const handleSync = async () => {
     if (downloadedData.length === 0) return;
-    Alert.alert("Importar", `Se guardarán ${downloadedData.length} registros en la App.`, [
+    Alert.alert("Guardar", `Se procesarán ${downloadedData.length} registros.`, [
         { text: "Cancelar", style: "cancel" },
         { text: "Confirmar", onPress: async () => {
             setIsBusy(true); setBusyMessage("Guardando en base de datos...");
@@ -365,30 +405,22 @@ export default function SDDataClimateScreen() {
                 const dataToInsert = downloadedData.map(p => ({
                     ...p, 
                     sensor_id: String(sensorId), 
-                    timestamp: toLocalISOString(new Date(p.timestamp)), 
+                    // FORMATO ISO STANDARD PARA DB
+                    timestamp: new Date(p.timestamp).toISOString(), 
                     is_synced: 0, 
-                    updated_at: new Date().toISOString()
+                    updated_at: new Date().toISOString(), 
+                    e1_hv: 0, e1_hg: 0, e2_hv: 0, e2_hg: 0, e3_hv: 0, e3_hg: 0,
                 }));
-                
-                const added = await insertReadingsC01(dataToInsert as any);
+                let added = 0;
+                // Usamos la inserción optimizada
+                if (sensorDb?.type === 'B01') added = await insertReadingsB01(dataToInsert as any); 
+                else added = await insertReadingsC01(dataToInsert as any);
                 setIsBusy(false);
-                Alert.alert("Éxito", `Se importaron ${added} registros nuevos.`, [{ 
-                    text: "OK", 
-                    onPress: () => { 
-                        resetStatus(); 
-                        setDownloadedData([]); 
-                        if(router.canGoBack()) router.back(); 
-                    }
-                }]);
-            } catch (_) { 
-                setIsBusy(false); 
-                Alert.alert("Error DB", "No se pudo guardar la información."); 
-            }
+                Alert.alert("Éxito", `Agregados: ${added}. Nuevos.`, [{ text: "OK", onPress: () => { resetStatus(); setDownloadedData([]); if(router.canGoBack()) router.back(); }}]);
+            } catch { setIsBusy(false); Alert.alert("Error DB", "No se pudo guardar la información."); }
         }}
     ]);
   };
-
-  const chartType = (range === '1M' || range === '1A') ? 'bar' : 'line';
 
   return (
     <View style={[styles.container, { paddingTop: insets.top }]}>
@@ -397,31 +429,39 @@ export default function SDDataClimateScreen() {
         <TouchableOpacity onPress={() => router.back()} style={styles.backButton}>
            <MaterialCommunityIcons name="arrow-left" size={24} color={Colors.textPrimary} />
         </TouchableOpacity>
-        <View><Text style={styles.title}>Descargar Clima (SD)</Text></View>
+        <View><Text style={styles.title}>Descargar SD</Text></View>
       </View>
 
       <ScrollView contentContainerStyle={{ paddingBottom: 100 }} keyboardShouldPersistTaps="handled">
         {/* Panel Control */}
         <View style={styles.controlPanel}>
-            <Text style={styles.label}>Rango de descarga:</Text>
+            <Text style={styles.label}>Intervalo:</Text>
             <View style={styles.filterContainer}>
-            {(['12h', '1D', '7D', '1M', '1A'] as ClimateTimeRange[]).map((r) => (
+            {(['Hoy', '1D', '7D', '30D', 'Custom'] as TimeRange[]).map((r) => (
                 <TouchableOpacity key={r} style={[styles.filterBtn, range === r && styles.filterBtnActive]} onPress={() => setRange(r)}>
-                <Text style={[styles.filterText, range === r && styles.filterTextActive]}>{r}</Text>
+                <Text style={[styles.filterText, range === r && styles.filterTextActive]}>{r === 'Custom' ? 'Manual' : r}</Text>
                 </TouchableOpacity>
             ))}
             </View>
-            
+            {range === 'Custom' && (
+                <View style={styles.customInputRow}>
+                    <Text style={styles.customLabel}>Descargar últimos:</Text>
+                    <View style={styles.inputWrapper}>
+                        <TextInput style={styles.input} value={customDays} onChangeText={setCustomDays} keyboardType="number-pad" maxLength={3} selectTextOnFocus />
+                        <Text style={styles.inputUnit}>Días</Text>
+                    </View>
+                    <Text style={styles.helperText}>(Desde {new Date(new Date().setDate(new Date().getDate() - (parseInt(customDays)||0))).toLocaleDateString()} hasta Hoy)</Text>
+                </View>
+            )}
             <TouchableOpacity style={styles.downloadButton} onPress={handleStartDownload}>
-                <MaterialCommunityIcons name="cloud-download-outline" size={24} color="#fff" />
-                <Text style={styles.downloadText}>DESCARGAR DATOS</Text>
+                <MaterialCommunityIcons name="download" size={24} color="#fff" />
+                <Text style={styles.downloadText}>INICIAR DESCARGA</Text>
             </TouchableOpacity>
         </View>
 
         {/* Visualización */}
-        {!isBusy && downloadedData.length > 0 && climateChartData && (
+        {!isBusy && downloadedData.length > 0 && (
             <View>
-                {/* Resumen General */}
                 <View style={{paddingHorizontal: 16, marginTop: 10}}>
                     <View style={styles.summaryCard}>
                         <View style={styles.summaryRow}>
@@ -429,7 +469,7 @@ export default function SDDataClimateScreen() {
                                 <MaterialCommunityIcons name="database-check" size={24} color={Colors.success} />
                                 <View style={{marginLeft: 10}}>
                                     <Text style={styles.summaryTitle}>Datos: {downloadedData.length}</Text>
-                                    <Text style={styles.summaryText}>registros obtenidos.</Text>
+                                    <Text style={styles.summaryText}>registros.</Text>
                                 </View>
                             </View>
                             <TouchableOpacity style={styles.toolButton} onPress={handleExportExcel}>
@@ -439,59 +479,61 @@ export default function SDDataClimateScreen() {
                     </View>
                 </View>
 
-                {/* Panel Agro */}
-                <View style={{paddingHorizontal: 16, marginTop: 15}}>
-                    <Text style={styles.sectionTitle}>Indicadores Calculados</Text>
-                    <View style={styles.agroPanel}>
-                      <View style={styles.agroItem}>
-                        <MaterialCommunityIcons name="snowflake" size={24} color="#004aad" />
-                        <Text style={styles.agroValue}>{Math.round(agroStats.chillHours)} h</Text>
-                        <Text style={styles.agroLabel}>Horas Frío</Text>
-                      </View>
-                      <View style={styles.dividerVertical} />
-                      <View style={styles.agroItem}>
-                        <MaterialCommunityIcons name="alert-octagon" size={24} color={agroStats.frostHours > 0 ? Colors.error : '#ccc'} />
-                        <Text style={[styles.agroValue, {color: agroStats.frostHours > 0 ? Colors.error : Colors.textPrimary}]}>
-                          {Math.round(agroStats.frostHours)} h
-                        </Text>
-                        <Text style={styles.agroLabel}>Heladas</Text>
-                      </View>
-                      <View style={styles.dividerVertical} />
-                      <View style={styles.agroItem}>
-                        <MaterialCommunityIcons name="white-balance-sunny" size={24} color={Colors.warning} />
-                        <Text style={styles.agroValue}>{Math.round(agroStats.heatStressHours)} h</Text>
-                        <Text style={styles.agroLabel}>Calor Ext.</Text>
-                      </View>
+                {sensorDb?.type === 'B01' && electrodesData && (
+                    <View style={styles.content}>
+                        <View style={{ marginTop: 15, marginBottom: 10 }}>
+                            <SegmentedControl options={['% Hv', '% Hg', 'mV']} selectedIndex={unit === '% Hv' ? 0 : unit === '% Hg' ? 1 : 2} onChange={(i) => setUnit(i === 0 ? '% Hv' : i === 1 ? '% Hg' : 'mV')} />
+                        </View>
+                        
+                        {soilTempData && (
+                            <ExportableChartCard 
+                                title="Temperatura Suelo" 
+                                stats={soilTempData.stats} data={soilTempData.data} 
+                                unit="°C" color={Colors.secondary}
+                                sensorId={String(sensorId)} sensorName={sensorDb?.alias || ''} sensorLocation={sensorDb?.location || ''} 
+                                dateRangeLabel={getDateRangeLabel()}
+                            />
+                        )}
+                        {[1, 2, 3].map((num) => {
+                            const refLines = getAgronomicLines(electrodesInfo[num], unit);
+                            let maxY = undefined;
+                            const satLine = refLines.find(l => l.label === 'SAT');
+                            if (satLine && satLine.value > 0) maxY = satLine.value + 5; 
+
+                            return (
+                                <ExportableChartCard 
+                                    key={num}
+                                    title={`Electrodo ${num}`}
+                                    stats={electrodesData[num]?.stats} data={electrodesData[num]?.data}
+                                    unit={unit} color={Colors.primary}
+                                    sensorId={String(sensorId)} sensorName={sensorDb?.alias || ''} sensorLocation={sensorDb?.location || ''}
+                                    dateRangeLabel={getDateRangeLabel()}
+                                    referenceLines={refLines} 
+                                    yAxisMax={maxY} 
+                                />
+                            );
+                        })}
                     </View>
-                </View>
+                )}
 
-                {/* Gráficos */}
-                <View style={styles.content}>
-                    <ExportableChartCard 
-                        title="Temperatura Ambiente" 
-                        stats={climateChartData.temp.stats} data={climateChartData.temp.data} 
-                        unit="°C" color={Colors.secondary}
-                        sensorId={String(sensorId)} sensorName={sensorDb?.alias || ''} sensorLocation={sensorDb?.location || ''} 
-                        dateRangeLabel={getDateRangeLabel()}
-                        referenceLines={CLIMATE_LINES} 
-                        type={chartType}
-                    />
-                    
-                    <ExportableChartCard 
-                        title="Humedad Relativa" 
-                        stats={climateChartData.hum.stats} data={climateChartData.hum.data} 
-                        unit="%" color={Colors.primary}
-                        sensorId={String(sensorId)} sensorName={sensorDb?.alias || ''} sensorLocation={sensorDb?.location || ''} 
-                        dateRangeLabel={getDateRangeLabel()}
-                        type={chartType}
-                    />
-                </View>
+                {sensorDb?.type === 'C01' && climateChartData && (
+                    <View style={styles.content}>
+                        <ExportableChartCard 
+                            title="Temperatura Aire" 
+                            stats={climateChartData.temp.stats} data={climateChartData.temp.data} unit="°C" color={Colors.secondary}
+                            sensorId={String(sensorId)} sensorName={sensorDb?.alias || ''} sensorLocation={sensorDb?.location || ''} dateRangeLabel={getDateRangeLabel()}
+                        />
+                        <ExportableChartCard 
+                            title="Humedad Relativa" 
+                            stats={climateChartData.hum.stats} data={climateChartData.hum.data} unit="%" color={Colors.primary}
+                            sensorId={String(sensorId)} sensorName={sensorDb?.alias || ''} sensorLocation={sensorDb?.location || ''} dateRangeLabel={getDateRangeLabel()}
+                        />
+                    </View>
+                )}
 
-                {/* Botón Sincronizar */}
                 <View style={[styles.content, {marginTop: 20}]}>
                     <TouchableOpacity style={styles.syncButton} onPress={handleSync}>
-                        <MaterialCommunityIcons name="content-save" size={20} color="#fff" />
-                        <Text style={styles.syncBtnText}>Guardar en Historial App</Text>
+                        <Text style={styles.syncBtnText}>Confirmar e Importar a App</Text>
                     </TouchableOpacity>
                 </View>
             </View>
@@ -518,7 +560,6 @@ const styles = StyleSheet.create({
   header: { flexDirection: 'row', alignItems: 'center', padding: 16, backgroundColor: '#fff', borderBottomWidth: 1, borderColor: '#eee' },
   backButton: { marginRight: 15, padding: 5 },
   title: { fontSize: 18, fontWeight: 'bold', color: Colors.textPrimary },
-  
   controlPanel: { backgroundColor: '#fff', padding: 16, marginBottom: 10, elevation: 2 },
   label: { fontSize: 14, fontWeight: '600', color: Colors.textSecondary, marginBottom: 8 },
   filterContainer: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 15, gap: 5 },
@@ -527,6 +568,16 @@ const styles = StyleSheet.create({
   filterText: { fontSize: 11, fontWeight: '700', color: Colors.textSecondary },
   filterTextActive: { color: '#fff' },
   
+  customInputRow: { alignItems: 'center', marginVertical: 15, backgroundColor: '#f9f9f9', padding: 15, borderRadius: 10, borderWidth: 1, borderColor: '#eee' },
+  customLabel: { fontSize: 14, color: Colors.textSecondary, marginBottom: 10 },
+  inputWrapper: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  input: { 
+      backgroundColor: '#fff', width: 80, height: 50, borderRadius: 10, borderWidth: 1, borderColor: Colors.primary,
+      textAlign: 'center', fontSize: 24, fontWeight: 'bold', color: Colors.textPrimary 
+  },
+  inputUnit: { fontSize: 16, fontWeight: 'bold', color: Colors.textSecondary },
+  helperText: { marginTop: 8, fontSize: 12, color: '#888', fontStyle: 'italic' },
+
   downloadButton: { flexDirection: 'row', backgroundColor: Colors.secondary, padding: 14, borderRadius: 12, alignItems: 'center', justifyContent: 'center', marginTop: 5 },
   downloadText: { color: '#fff', fontWeight: 'bold', marginLeft: 8 },
   
@@ -545,27 +596,54 @@ const styles = StyleSheet.create({
   summaryTitle: { fontSize: 14, fontWeight: 'bold', color: Colors.textPrimary },
   summaryText: { fontSize: 12, color: Colors.textSecondary },
   
-  toolButton: { width: 40, height: 40, borderRadius: 8, backgroundColor: '#217346', justifyContent: 'center', alignItems: 'center', elevation: 2 },
+  toolButton: {
+      width: 40, height: 40,
+      borderRadius: 8,
+      backgroundColor: '#217346', // Excel Green
+      justifyContent: 'center',
+      alignItems: 'center',
+      elevation: 2
+  },
 
   content: { paddingHorizontal: 16 },
-  sectionTitle: { fontSize: 16, fontWeight: 'bold', color: Colors.textPrimary, marginBottom: 10 },
-
-  // Panel Agro
-  agroPanel: { flexDirection: 'row', backgroundColor: '#fff', borderRadius: 16, padding: 15, elevation: 2, marginBottom: 15, borderWidth: 1, borderColor: '#eee', justifyContent: 'space-between' },
-  agroItem: { flex: 1, alignItems: 'center' },
-  agroValue: { fontSize: 18, fontWeight: 'bold', color: Colors.textPrimary, marginVertical: 4 },
-  agroLabel: { fontSize: 11, fontWeight: 'bold', color: Colors.textSecondary },
-  dividerVertical: { width: 1, backgroundColor: '#eee', height: '80%', alignSelf: 'center' },
-
-  syncButton: { flexDirection: 'row', backgroundColor: Colors.success, paddingVertical: 14, justifyContent: 'center', borderRadius: 12, alignItems: 'center', marginBottom: 30, elevation: 3, gap: 10 },
+  
+  syncButton: { flexDirection: 'row', backgroundColor: Colors.success, paddingVertical: 14, justifyContent: 'center', borderRadius: 12, alignItems: 'center', marginBottom: 15, elevation: 3, gap: 10 },
   syncBtnText: { color: '#fff', fontSize: 16, fontWeight: 'bold' },
 
-  // Tarjetas Exportables
+  // --- ESTILOS TARJETA (CORREGIDOS Y SIMPLIFICADOS) ---
   chartCardContainer: { marginTop: 20 },
-  chartHeader: { flexDirection: 'row', justifyContent: 'flex-end', alignItems: 'center', marginBottom: -20, zIndex: 10, paddingRight: 5 },
-  miniExportButton: { padding: 8, backgroundColor: '#fff', borderRadius: 20, borderWidth: 1, borderColor: '#eee', elevation: 3 },
-  captureContainer: { backgroundColor: '#fff', borderRadius: 16, padding: 15, borderWidth: 1, borderColor: '#eee', elevation: 2, shadowColor: '#000', shadowOpacity: 0.05, shadowRadius: 4, shadowOffset: {width:0, height:2} },
-  innerHeader: { borderBottomWidth: 1, borderBottomColor: '#f0f0f0', paddingBottom: 8, marginBottom: 10 },
+  chartHeader: { 
+      flexDirection: 'row', 
+      justifyContent: 'flex-end', // Botón a la derecha
+      alignItems: 'center', 
+      marginBottom: -20, // Truco visual para que el botón "muerda" la tarjeta
+      zIndex: 10,
+      paddingRight: 5
+  },
+  miniExportButton: {
+      padding: 8,
+      backgroundColor: '#fff',
+      borderRadius: 20,
+      borderWidth: 1,
+      borderColor: '#eee',
+      elevation: 3,
+  },
+  // ESTILOS DE LA CAPTURA
+  captureContainer: {
+      backgroundColor: '#fff',
+      borderRadius: 16,
+      padding: 15,
+      borderWidth: 1,
+      borderColor: '#eee',
+      elevation: 2,
+      shadowColor: '#000', shadowOpacity: 0.05, shadowRadius: 4, shadowOffset: {width:0, height:2},
+  },
+  innerHeader: {
+      borderBottomWidth: 1, 
+      borderBottomColor: '#f0f0f0', 
+      paddingBottom: 8, 
+      marginBottom: 10
+  },
   chartTitle: { fontSize: 16, fontWeight: 'bold', color: Colors.textPrimary },
   sensorSubtitle: { fontSize: 12, color: Colors.textSecondary, marginTop: 2 },
   cardFooter: { marginTop: 10, paddingTop: 8, borderTopWidth: 1, borderTopColor: '#f0f0f0' },

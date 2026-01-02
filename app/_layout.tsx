@@ -7,6 +7,7 @@ import { ActivityIndicator, Text, View } from 'react-native';
 import { AuthProvider, useAuth } from '../context/AuthContext';
 import { BleProvider } from '../context/BleContext';
 import { initDatabase } from '../database/DatabaseInit';
+import { debugDatabase } from '../utils/DatabaseDebug'; // Importar
 
 function RootNavigation() {
   const { session, isLoading: isAuthLoading } = useAuth();
@@ -57,6 +58,7 @@ export default function RootLayout() {
     const prepare = async () => {
       try {
         await initDatabase();
+        await debugDatabase();
         setIsDbReady(true); // ¡Solo ahora permitimos renderizar la App!
       } catch (e) {
         console.error("Error iniciando DB:", e);

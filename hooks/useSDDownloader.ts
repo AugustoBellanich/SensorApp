@@ -4,9 +4,13 @@ import { Alert, Platform } from 'react-native';
 import { Device } from 'react-native-ble-plx';
 import { BLE_UUIDS } from '../constants/BleUUIDs';
 
+// --- CAMBIO 1: IMPORTAMOS EL PARSER CENTRALIZADO ---
+import { parseSensorCSV } from '../utils/dataProcessing';
+
 export type TimeRange = 'Hoy' | '1D' | '7D' | '30D' | 'Custom';
 export type DownloadStatus = 'idle' | 'downloading' | 'processing' | 'ready' | 'error';
 
+// (La interfaz DownloadResult ya no es estrictamente necesaria porque usamos any[], pero la dejamos por referencia)
 interface DownloadResult {
   timestamp: number;
   [key: string]: number;
@@ -28,23 +32,24 @@ export const useSDDownloader = () => {
   const currentFileBuffer = useRef<string>("");
   const fileSizeRef = useRef<number>(0);
   const lastProgressUpdate = useRef<number>(0); 
-  const accummulatedData = useRef<DownloadResult[]>([]);
+  
+  // --- CAMBIO 2: Usamos any[] para recibir los datos limpios del parser ---
+  const accummulatedData = useRef<any[]>([]);
   
   // --- CONTROL DE CONCURRENCIA ---
   const abortRef = useRef(false);
   const currentSessionId = useRef<number>(0); 
   
-  // --- WATCHDOG (TIMEOUT DINÁMICO) ---
-  // CORRECCIÓN 1: Usamos 'any' para evitar conflicto entre number (RN) y NodeJS.Timeout
+  // --- WATCHDOG ---
   const watchdogTimer = useRef<any>(null);
 
-  // Función para reiniciar el "Perro Guardián"
   const kickWatchdog = () => {
       if (watchdogTimer.current) clearTimeout(watchdogTimer.current);
       
       watchdogTimer.current = setTimeout(() => {
           if (activeResolver.current) {
-              console.warn(`[SD] 🛑 Watchdog: Silencio detectado > 3s. Cerrando archivo.`);
+              console.warn(`[SD] 🛑 Watchdog: Silencio detectado > 3s.`);
+              // Si tenemos algo de buffer, lo devolvemos para no perder todo
               if (currentFileBuffer.current.length > 50) {
                   activeResolver.current(currentFileBuffer.current);
               } else {
@@ -115,7 +120,6 @@ export const useSDDownloader = () => {
 
         const chunk = Buffer.from(characteristic.value, 'base64').toString('utf-8');
 
-        // 1. Detectar Metadata (Firmware envía "SIZE=12345")
         if (chunk.startsWith("SIZE=") || chunk.startsWith("META:")) {
             const sizeMatch = chunk.match(/SIZE=(\d+)/);
             if (sizeMatch) fileSizeRef.current = parseInt(sizeMatch[1]);
@@ -123,10 +127,10 @@ export const useSDDownloader = () => {
             lastProgressUpdate.current = 0;
             console.log(`[SD] Inicio descarga. Tamaño: ${fileSizeRef.current}`);
         
-        // 2. Detectar Fin de Archivo (Firmware envía "EOF")
         } else if (chunk.includes("EOF") || chunk.includes("DONE")) {
             if (activeResolver.current) {
                 if (watchdogTimer.current) clearTimeout(watchdogTimer.current);
+                // Devolvemos el buffer completo acumulado
                 activeResolver.current(currentFileBuffer.current.slice(0));
                 activeResolver.current = null;
             }
@@ -141,7 +145,6 @@ export const useSDDownloader = () => {
         
         } else {
             currentFileBuffer.current += chunk;
-            
             const now = Date.now();
             if (fileSizeRef.current > 0 && (now - lastProgressUpdate.current > 300)) {
                 const pct = Math.min(100, Math.floor((currentFileBuffer.current.length / fileSizeRef.current) * 100));
@@ -161,7 +164,6 @@ export const useSDDownloader = () => {
         fileSizeRef.current = 0;
         
         if (watchdogTimer.current) clearTimeout(watchdogTimer.current);
-        // Timeout inicial por si nunca llega respuesta
         watchdogTimer.current = setTimeout(() => {
              console.warn(`[SD] Timeout Inicial: No hubo respuesta para ${filename}`);
              if (activeResolver.current) {
@@ -186,68 +188,9 @@ export const useSDDownloader = () => {
     });
   };
 
-  // 4. PARSEADOR
-  const parseFullFileContent = (fullText: string, sensorType: string) => {
-    let cleanText = fullText
-        .replace(/SIZE=\d+/g, '')
-        .replace(/EOF/g, '')
-        .replace(/META:.*?\n/g, '')
-        .replace(/DATA_START\n?/g, '')
-        .replace(/DATA_END\n?/g, '')
-        .replace(/DONE\n?/g, '')
-        .replace(/\0/g, '') 
-        .replace(/\r\n/g, '\n'); 
-    
-    const rawLines = cleanText.split('\n');
-    const uniqueLines = new Set<string>();
-    
-    rawLines.forEach(line => {
-        const trimmed = line.trim();
-        if (trimmed.length > 15 && !trimmed.startsWith('#')) {
-            uniqueLines.add(trimmed);
-        }
-    });
+  // --- CAMBIO 3: ELIMINADA parseFullFileContent (Ahora usamos la importada) ---
 
-    const isB01 = sensorType === 'B01';
-
-    uniqueLines.forEach((line) => {
-        if (line.includes('datetime')) return;
-        const parts = line.split(',');
-        if (parts.length < 4) return;
-
-        const dateStr = parts[0].replace(/"/g, '').trim(); 
-        let timestamp = Date.parse(dateStr.replace(' ', 'T'));
-        
-        if (isNaN(timestamp)) {
-             const dtParts = dateStr.split(/[- :]/);
-             if (dtParts.length >= 6) {
-                 timestamp = new Date(
-                     parseInt(dtParts[0]), parseInt(dtParts[1]) - 1, parseInt(dtParts[2]), 
-                     parseInt(dtParts[3]), parseInt(dtParts[4]), parseInt(dtParts[5])
-                 ).getTime();
-             }
-        }
-
-        if (isNaN(timestamp)) return;
-
-        const item: any = { timestamp };
-
-        if (isB01) {
-            item.soil_temp = parseFloat(parts[1]) || 0;
-            item.e1_mv = parseFloat(parts[2]) || 0;
-            item.e2_mv = parseFloat(parts[3]) || 0;
-            item.e3_mv = parseFloat(parts[4]) || 0;
-            item.battery_mv = (parseFloat(parts[5]) || 0) * 1000; 
-        } else {
-            item.air_temp = parseFloat(parts[1]) || 0;
-            item.humidity = parseFloat(parts[2]) || 0;
-            item.battery_mv = (parseFloat(parts[3]) || 0) * 1000;
-        }
-        accummulatedData.current.push(item);
-    });
-  };
-
-  // 5. START DOWNLOAD
+  // 4. START DOWNLOAD (Refactorizado)
   const startDownload = async (
       device: Device | null, 
       sensorType: string, 
@@ -255,10 +198,7 @@ export const useSDDownloader = () => {
       customStart?: Date,
       customEnd?: Date
   ) => {
-    if (!device) {
-        Alert.alert("Error", "No conectado");
-        return;
-    }
+    if (!device) { Alert.alert("Error", "No conectado"); return; }
     
     currentSessionId.current += 1; 
     const mySessionId = currentSessionId.current;
@@ -271,7 +211,6 @@ export const useSDDownloader = () => {
 
     try {
         if (Platform.OS === 'android') {
-            // CORRECCIÓN 2: Eliminado variable 'e' no usada
             try { await device.requestMTU(512); } catch {}
         }
 
@@ -279,7 +218,6 @@ export const useSDDownloader = () => {
         setTotalFiles(queue.length);
         
         await setupNotificationChannel(device, mySessionId);
-        
         await new Promise(r => setTimeout(r, 300));
 
         for (const filename of queue) {
@@ -296,16 +234,23 @@ export const useSDDownloader = () => {
             await new Promise(r => setTimeout(r, 400));
 
             try {
-                const content = await downloadSingleFile(device, filename);
+                // Obtenemos el contenido CRUDO del archivo (string gigante)
+                const contentRaw = await downloadSingleFile(device, filename);
                 
-                if (content && content.length > 20) { 
-                    parseFullFileContent(content, sensorType);
+                if (contentRaw && contentRaw.length > 20) { 
+                    // --- CAMBIO 4: USAMOS EL PARSER EXTERNO ---
+                    // Esto limpia el string, arregla fechas y devuelve objetos
+                    const parsedItems = parseSensorCSV(contentRaw, sensorType);
+                    
+                    if (parsedItems.length > 0) {
+                        // Agregamos al acumulador
+                        accummulatedData.current.push(...parsedItems);
+                    }
                     consecutiveErrors = 0; 
                 } else {
                     consecutiveErrors++; 
                 }
             } catch (err) {
-                // CORRECCIÓN 3: Uso de la variable 'err' para logging
                 console.warn(`[SD-HOOK] Error descargando ${filename}:`, err);
                 consecutiveErrors++;
             }
@@ -317,6 +262,7 @@ export const useSDDownloader = () => {
         if (watchdogTimer.current) clearTimeout(watchdogTimer.current);
 
         setStatus('processing');
+        // Ordenamos por fecha al final para asegurar consistencia
         accummulatedData.current.sort((a, b) => a.timestamp - b.timestamp);
         
         setStatus('ready');

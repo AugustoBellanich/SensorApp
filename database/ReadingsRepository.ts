@@ -2,73 +2,45 @@ import { db } from './DatabaseInit';
 import { ReadingB01, ReadingC01 } from './types';
 
 // =====================================================================
-// INSERCIONES INTELIGENTES (Update if Exists)
+// INSERCIONES OPTIMIZADAS (UPSERT BATCH)
 // =====================================================================
 
 // --- B01 SUELO ---
 export const insertReadingsB01 = async (readings: ReadingB01[]): Promise<number> => {
   if (readings.length === 0) return 0;
   
-  let processedCount = 0;
-
   try {
     await db.withTransactionAsync(async () => {
       for (const r of readings) {
-        // 1. Verificar si existe
-        const existingRecord = await db.getFirstAsync<{ id: number }>(
-          'SELECT id FROM readings_b01 WHERE sensor_id = ? AND timestamp = ?', 
-          [r.sensor_id, r.timestamp]
-        );
+        // CORRECCIÓN CLAVE: Respetamos el estado de sincronización que trae el dato
+        // Si viene de SD será 0. Si viene de Nube será 1.
+        const syncStatus = (r.is_synced !== undefined) ? r.is_synced : 0;
 
-        if (existingRecord) {
-          // 2A. SI EXISTE -> ACTUALIZAMOS (Sobrescribir basura vieja)
-          await db.runAsync(
-            `UPDATE readings_b01 SET 
-                soil_temp = ?, 
-                e1_mv = ?, e1_hv = ?, e1_hg = ?,
-                e2_mv = ?, e2_hv = ?, e2_hg = ?,
-                e3_mv = ?, e3_hv = ?, e3_hg = ?,
-                battery_mv = ?, is_synced = ?, updated_at = ?
-             WHERE id = ?`,
-            [
-              r.soil_temp,
-              r.e1_mv, r.e1_hv || 0, r.e1_hg || 0,
-              r.e2_mv, r.e2_hv || 0, r.e2_hg || 0,
-              r.e3_mv, r.e3_hv || 0, r.e3_hg || 0,
-              r.battery_mv, 
-              1, // is_synced
-              new Date().toISOString(), // updated_at
-              existingRecord.id // WHERE id
-            ]
-          );
-        } else {
-          // 2B. NO EXISTE -> INSERTAMOS
-          await db.runAsync(
-            `INSERT INTO readings_b01 (
-                sensor_id, timestamp, soil_temp, 
-                e1_mv, e1_hv, e1_hg, 
-                e2_mv, e2_hv, e2_hg, 
-                e3_mv, e3_hv, e3_hg, 
-                battery_mv, is_synced, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            [
-              r.sensor_id, r.timestamp, r.soil_temp,
-              r.e1_mv, r.e1_hv || 0, r.e1_hg || 0,
-              r.e2_mv, r.e2_hv || 0, r.e2_hg || 0,
-              r.e3_mv, r.e3_hv || 0, r.e3_hg || 0,
-              r.battery_mv, 
-              1, 
-              new Date().toISOString()
-            ]
-          );
-        }
-        processedCount++;
+        await db.runAsync(
+          `INSERT OR REPLACE INTO readings_b01 (
+              sensor_id, timestamp, soil_temp, 
+              e1_mv, e1_hv, e1_hg, 
+              e2_mv, e2_hv, e2_hg, 
+              e3_mv, e3_hv, e3_hg, 
+              battery_mv, is_synced, updated_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            r.sensor_id.trim(), // <--- BLINDAJE: Quitamos espacios
+            r.timestamp, r.soil_temp,
+            r.e1_mv, r.e1_hv || 0, r.e1_hg || 0,
+            r.e2_mv, r.e2_hv || 0, r.e2_hg || 0,
+            r.e3_mv, r.e3_hv || 0, r.e3_hg || 0,
+            r.battery_mv, 
+            syncStatus, // <--- CAMBIO IMPORTANTE: NO SIEMPRE 1
+            new Date().toISOString()
+          ]
+        );
       }
     });
-    console.log(`[DB] B01: Procesados/Actualizados ${processedCount} registros.`);
-    return processedCount;
+    console.log(`[DB] B01: Insertados/Actualizados ${readings.length} registros.`);
+    return readings.length;
   } catch (e) {
-    console.error("Error insertando/actualizando batch B01", e);
+    console.error("❌ Error CRÍTICO insertando batch B01:", e);
     throw e;
   }
 };
@@ -77,115 +49,91 @@ export const insertReadingsB01 = async (readings: ReadingB01[]): Promise<number>
 export const insertReadingsC01 = async (readings: ReadingC01[]): Promise<number> => {
   if (readings.length === 0) return 0;
 
-  let processedCount = 0;
-
   try {
     await db.withTransactionAsync(async () => {
       for (const r of readings) {
-        const existingRecord = await db.getFirstAsync<{ id: number }>(
-          'SELECT id FROM readings_c01 WHERE sensor_id = ? AND timestamp = ?',
-          [r.sensor_id, r.timestamp]
-        );
+        const syncStatus = (r.is_synced !== undefined) ? r.is_synced : 0;
 
-        if (existingRecord) {
-           // ACTUALIZAR
-           await db.runAsync(
-            `UPDATE readings_c01 SET 
-                air_temp = ?, humidity = ?, battery_mv = ?, 
-                is_synced = ?, updated_at = ?
-             WHERE id = ?`,
-            [
-                r.air_temp, r.humidity, r.battery_mv, 
-                1, new Date().toISOString(), 
-                existingRecord.id
-            ]
-           );
-        } else {
-           // INSERTAR
-           await db.runAsync(
-            `INSERT INTO readings_c01 (
-                sensor_id, timestamp, air_temp, humidity, battery_mv, is_synced, updated_at
-             ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-            [
-                r.sensor_id, r.timestamp, r.air_temp, r.humidity, r.battery_mv, 
-                1, new Date().toISOString()
-            ]
-          );
-        }
-        processedCount++;
+        await db.runAsync(
+          `INSERT OR REPLACE INTO readings_c01 (
+              sensor_id, timestamp, air_temp, humidity, battery_mv, is_synced, updated_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          [
+            r.sensor_id.trim(), // <--- BLINDAJE
+            r.timestamp, r.air_temp, r.humidity, r.battery_mv, 
+            syncStatus, new Date().toISOString()
+          ]
+        );
       }
     });
-    console.log(`[DB] C01: Procesados/Actualizados ${processedCount} registros.`);
-    return processedCount;
+    console.log(`[DB] C01: Insertados/Actualizados ${readings.length} registros.`);
+    return readings.length;
   } catch (e) {
-    console.error("Error insertando/actualizando batch C01", e);
+    console.error("❌ Error CRÍTICO insertando batch C01:", e);
     throw e;
   }
 };
 
 // =====================================================================
-// HELPER: Borrar Rango (Para el botón de basura)
+// HELPER: Borrar Rango
 // =====================================================================
-export const deleteReadingsRange = async (sensorId: string, type: 'B01' | 'C01', start: Date, end: Date) => {
-  const table = type === 'B01' ? 'readings_b01' : 'readings_c01';
-  // IMPORTANTE: Convertir fechas al formato exacto que usas en el INSERT (ISO Local cortado)
-  // Si usas toLocalISOString en el insert, úsalo aquí también. Si usas ISO estándar, usa ISO estándar.
-  // Para asegurar consistencia, usamos strings simples de ISO si tu DB los guarda así.
+export const deleteReadingsRange = async (sensorId: string, type: string, start: Date, end: Date) => {
+  // BLINDAJE: Normalizamos el tipo (da igual si mandas 'b01' o 'B01')
+  const safeType = type.toUpperCase().trim();
+  const table = safeType === 'B01' ? 'readings_b01' : 'readings_c01';
   
-  // Helper local rápido para coincidir con tu formato de guardado
-  const toLocalLike = (d: Date) => {
-      const tzOffset = d.getTimezoneOffset() * 60000;
-      const local = new Date(d.getTime() - tzOffset);
-      return local.toISOString().slice(0, -1);
-  };
-
-  const s = toLocalLike(start); 
-  const e = toLocalLike(end);
+  const s = start.toISOString();
+  const e = end.toISOString();
   
-  console.log(`[DB DELETE] Borrando ${table} desde ${s} hasta ${e}`);
+  console.log(`[DB DELETE] Borrando ${table} para ${sensorId} (${s} -> ${e})`);
 
   const result = await db.runAsync(
     `DELETE FROM ${table} WHERE sensor_id = ? AND timestamp >= ? AND timestamp <= ?`,
-    [sensorId, s, e]
+    [sensorId.trim(), s, e]
   );
   return result.changes;
 };
 
 // =====================================================================
-// CONSULTAS DE LECTURA (Sin cambios, solo para referencia)
+// CONSULTAS DE LECTURA (Blindadas y con Logs)
 // =====================================================================
 
-// Helper de formato fecha para consultas
-const toLocalISOStringQuery = (date: Date) => {
-  const tzOffset = date.getTimezoneOffset() * 60000;
-  const localTime = new Date(date.getTime() - tzOffset);
-  return localTime.toISOString().slice(0, -1);
-};
-
-export const getReadingsInRange = async (sensorId: string, type: 'B01' | 'C01', start: Date, end: Date): Promise<any[]> => {
+export const getReadingsInRange = async (sensorId: string, type: string, start: Date, end: Date): Promise<any[]> => {
     try {
-        const tableName = type === 'B01' ? 'readings_b01' : 'readings_c01';
-        const startStr = toLocalISOStringQuery(start);
-        const endStr = toLocalISOStringQuery(end);
+        // BLINDAJE TOTAL DE TIPO Y ID
+        const safeType = type.toUpperCase().trim();
+        const safeId = sensorId.trim();
+        const tableName = safeType === 'B01' ? 'readings_b01' : 'readings_c01';
+        
+        const startStr = start.toISOString();
+        const endStr = end.toISOString();
 
-        return await db.getAllAsync(
+        // LOG CHIVATO INTERNO
+        console.log(`[DB QUERY] Tabla: ${tableName} | ID: '${safeId}' | Rango: ${startStr} a ${endStr}`);
+
+        // Usamos una consulta simple pero efectiva
+        const results = await db.getAllAsync(
             `SELECT * FROM ${tableName} 
              WHERE sensor_id = ? AND timestamp >= ? AND timestamp <= ? 
              ORDER BY timestamp ASC`,
-            [sensorId, startStr, endStr]
+            [safeId, startStr, endStr]
         );
+        
+        console.log(`[DB RESULT] Encontrados: ${results.length}`);
+        return results;
+
     } catch (e) {
-        console.error(`Error query rango ${sensorId}`, e);
+        console.error(`❌ Error query rango ${sensorId}:`, e);
         return [];
     }
 };
 
 export const getLastReadingB01 = async (sensorId: string): Promise<ReadingB01 | null> => {
-  const result = await db.getFirstAsync('SELECT * FROM readings_b01 WHERE sensor_id = ? ORDER BY timestamp DESC LIMIT 1', [sensorId]);
+  const result = await db.getFirstAsync('SELECT * FROM readings_b01 WHERE sensor_id = ? ORDER BY timestamp DESC LIMIT 1', [sensorId.trim()]);
   return result as ReadingB01 | null;
 };
 
 export const getLastReadingC01 = async (sensorId: string): Promise<ReadingC01 | null> => {
-  const result = await db.getFirstAsync('SELECT * FROM readings_c01 WHERE sensor_id = ? ORDER BY timestamp DESC LIMIT 1', [sensorId]);
+  const result = await db.getFirstAsync('SELECT * FROM readings_c01 WHERE sensor_id = ? ORDER BY timestamp DESC LIMIT 1', [sensorId.trim()]);
   return result as ReadingC01 | null;
 };
