@@ -194,6 +194,68 @@ export default function SDDataScreen() {
   const [soilTempData, setSoilTempData] = useState<any>(null); 
   const [climateChartData, setClimateChartData] = useState<any>(null);
 
+  const [chartSettings, setChartSettings] = useState({ 
+      intervalMs: 3600000, 
+      spacing: 40, 
+      labelFormat: 'hour' // 'hour' | 'day' | 'date'
+  });
+
+  // Calcula el intervalo ideal para que SIEMPRE tengas entre 50 y 100 puntos.
+  const optimizeChartData = (rawData: any[]) => {
+      if (!rawData || rawData.length === 0) return chartSettings;
+
+      const timestamps = rawData.map(d => d.timestamp);
+      const minTs = Math.min(...timestamps);
+      const maxTs = Math.max(...timestamps);
+      const totalDurationMs = maxTs - minTs;
+
+      // OBJETIVO: Queremos ver aprox 60-80 puntos en la gráfica para que no se sature.
+      const TARGET_POINTS = 70; 
+
+      // Intervalo ideal = Duración Total / Puntos Deseados
+      let calculatedInterval = totalDurationMs / TARGET_POINTS;
+
+      // Normalizamos a intervalos humanos (15min, 1h, 4h, 12h, 1d)
+      const MIN_15 = 15 * 60 * 1000;
+      const HOUR_1 = 60 * 60 * 1000;
+      const HOUR_4 = 4 * HOUR_1;
+      const HOUR_12 = 12 * HOUR_1;
+      const DAY_1 = 24 * HOUR_1;
+
+      let finalInterval = HOUR_1; // Default
+      let labelFmt = 'hour';
+      let spacing = 40;
+
+      if (calculatedInterval <= MIN_15) {
+          finalInterval = MIN_15; // Mucho detalle (Zoom alto)
+          labelFmt = 'hour';
+          spacing = 50; 
+      } else if (calculatedInterval <= HOUR_1) {
+          finalInterval = HOUR_1;
+          labelFmt = 'hour';
+          spacing = 40;
+      } else if (calculatedInterval <= HOUR_4) {
+          finalInterval = HOUR_4;
+          labelFmt = 'day-hour'; // Ej: "Lun 14h"
+          spacing = 35;
+      } else if (calculatedInterval <= HOUR_12) {
+          finalInterval = HOUR_12;
+          labelFmt = 'day';
+          spacing = 30;
+      } else {
+          finalInterval = DAY_1; // Zoom lejos (tendencia mensual)
+          labelFmt = 'date'; // Ej: "01/05"
+          spacing = 25;
+      }
+
+      // Si hay muy pocos datos (ej: recién prendido), forzamos espaciado grande
+      if (rawData.length < 10) spacing = 60;
+
+      return { intervalMs: finalInterval, spacing, labelFormat: labelFmt };
+  };
+
+  
+
   // Inicialización
   useEffect(() => {
     const init = async () => {
@@ -235,35 +297,39 @@ export default function SDDataScreen() {
   };
 
   // --- MODIFICADO PARA SOPORTAR PUNTOS INVISIBLES ---
-  const formatForChart = (arr: any[], daysLoaded: number) => arr.map(p => {
+  const formatForChart = (arr: any[], format: string) => arr.map(p => {
       if (p.hideDataPoint) {
-           return { 
-               value: p.value, 
-               label: "", 
-               hideDataPoint: true, 
-               dataPointRadius: 0, 
-               stripHeight: 0 
-           };
+           return { value: p.value, label: "", hideDataPoint: true, dataPointRadius: 0, stripHeight: 0 };
       }
-
       const d = new Date(p.timestamp);
-      let label = (daysLoaded <= 2) 
-        ? d.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})
-        : `${d.getDate()}/${d.getMonth()+1} ${d.getHours()}h`;
+      let label = "";
+      
+      if (format === 'hour') label = d.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+      else if (format === 'day-hour') label = `${d.getDate()} ${d.getHours()}h`;
+      else if (format === 'day') label = `${d.getDate()}/${d.getMonth()+1}`;
+      else label = `${d.getDate()}/${d.getMonth()+1}`; // Date
+
       return { value: p.value, label };
   });
 
   const calculateStats = (arr: any[]) => {
     if (!arr.length) return { min: 0, max: 0, avg: 0 };
+    // Usamos los datos reducidos para los stats visuales de la tarjeta
     const vals = arr.map(d => d.value);
     return { min: Math.min(...vals), max: Math.max(...vals), avg: calculateMedian(vals) }; 
   };
 
   // Procesamiento
   const processVisualization = useCallback((rawData: any[]) => {
-    if (!sensorDb) return;
+    if (!sensorDb || rawData.length === 0) return;
+    
+    // 1. Calcular configuración óptima basada en los datos reales descargados
+    const settings = optimizeChartData(rawData);
+    setChartSettings(settings);
+
     const isB01 = sensorDb.type === 'B01';
     
+    // 2. Pre-cálculo de valores físicos (Humedad/Temp)
     const processedRaw = rawData.map(d => {
         let v1 = d.e1_mv, v2 = d.e2_mv, v3 = d.e3_mv;
         if (isB01 && unit !== 'mV') {
@@ -280,27 +346,28 @@ export default function SDDataScreen() {
         return { ...d, v1, v2, v3 };
     });
 
-    const days = range === 'Custom' ? (parseInt(customDays) || 1) : (range === '30D' ? 30 : range === '7D' ? 7 : 1);
-    let intervalMs = 3600 * 1000; 
-    if (days > 20) intervalMs = 24 * 3600 * 1000; 
-    else if (days > 3) intervalMs = 6 * 3600 * 1000; 
+    const { intervalMs, labelFormat } = settings;
 
-    // --- LOGICA DE GRILLA TEMPORAL ---
+    // 3. Grilla Temporal (Inicio y Fin ajustados a los datos)
     const timestamps = processedRaw.map(d => d.timestamp);
     const minTs = Math.min(...timestamps);
     const maxTs = Math.max(...timestamps);
+    // Alineamos al intervalo (ej: si interval es 1h, empezamos a las 14:00, no 14:12)
     const startDate = new Date(Math.floor(minTs / intervalMs) * intervalMs);
     const endDate = new Date(Math.ceil(maxTs / intervalMs) * intervalMs);
 
     const prepare = (dataKey: string, arr: any[]) => {
-        // 1. Reducción
+        // A. Reducción (Downsampling por Mediana)
         const downsampled = downsampleData(arr, dataKey, intervalMs);
-        // 2. Stats (datos reales)
+        
+        // B. Stats (Calculados sobre la data reducida para coincidir con el gráfico)
         const stats = calculateStats(downsampled);
-        // 3. Relleno de Huecos (Unir puntos)
+        
+        // C. Relleno de Huecos
         const filled = fillTimeGaps(downsampled, intervalMs, startDate, endDate);
-        // 4. Formato Gráfica
-        const data = formatForChart(filled, days);
+        
+        // D. Formato Visual
+        const data = formatForChart(filled, labelFormat);
 
         return { data, stats };
     };
@@ -318,7 +385,7 @@ export default function SDDataScreen() {
             hum: prepare('humidity', processedRaw),
         });
     }
-  }, [sensorDb, unit, electrodeConfig, densities, range, customDays]); 
+  }, [sensorDb, unit, electrodeConfig, densities]);
 
   // Acciones
   const handleStartDownload = async () => {

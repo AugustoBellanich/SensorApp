@@ -15,7 +15,7 @@ import {
 
 import { Colors } from '../constants/Colors';
 import { GlobalStyles } from '../constants/GlobalStyles';
-import { supabase } from '../lib/supabase';
+import { SUPABASE_URL, supabase } from '../lib/supabase';
 
 export default function LoginScreen() {
   const router = useRouter();
@@ -23,11 +23,13 @@ export default function LoginScreen() {
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
 
+  // VERIFICACIÓN DE SEGURIDAD VISUAL
+  const isConfigMissing = !SUPABASE_URL || SUPABASE_URL === "";
+
   const handleLogin = async () => {
     if(loading) return;
     setLoading(true);
 
-    // Intentamos loguear con Supabase
     const { error } = await supabase.auth.signInWithPassword({
       email: email,
       password: password,
@@ -38,67 +40,87 @@ export default function LoginScreen() {
     if (error) {
       Alert.alert('Error de Acceso', error.message);
     } else {
-      // Si el login es exitoso, el AuthContext detectará el cambio de sesión
-      // y el RootLayout te redirigirá, pero forzamos por seguridad UX:
       router.replace('/home');
     }
   };
 
   return (
-    <KeyboardAvoidingView 
-      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-      style={GlobalStyles.containerCentered}
-    >
-      <Text style={GlobalStyles.title}>PROYECTO</Text>
+    // 1. Contenedor Principal (Fijo)
+    <View style={localStyles.mainContainer}>
       
-      <Image 
-        source={require('../assets/images/isologotipo_light.png')} 
-        style={localStyles.logoImage} 
-        resizeMode="contain"
-      />
+      {/* 2. Área que reacciona al teclado (Título, Logo, Formulario) */}
+      <KeyboardAvoidingView 
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        style={[GlobalStyles.containerCentered, { flex: 1, width: '100%' }]}
+      >
+        <Text style={GlobalStyles.title}>PROYECTO</Text>
+        
+        <Image 
+          source={require('../assets/images/isologotipo_light.png')} 
+          style={localStyles.logoImage} 
+          resizeMode="contain"
+        />
 
-      <View style={localStyles.formContainer}>
-        <View style={localStyles.inputWrapper}>
-          <Text style={localStyles.label}>Usuario (Email)</Text>
-          <TextInput 
-            style={localStyles.input}
-            placeholder="usuario@inta.gob.ar"
-            autoCapitalize="none"
-            value={email}
-            onChangeText={setEmail}
-          />
+        {isConfigMissing && (
+          <View style={{backgroundColor: '#ffebee', padding: 10, borderRadius: 8, marginBottom: 20}}>
+            <Text style={{color: '#d32f2f', textAlign: 'center', fontWeight: 'bold'}}>
+              ⚠️ ERROR: API URL NO DEFINIDA
+            </Text>
+            <Text style={{color: '#d32f2f', fontSize: 10, textAlign: 'center'}}>
+              El archivo .env no se cargó en el build.
+            </Text>
+          </View>
+        )}
+
+        <View style={localStyles.formContainer}>
+          <View style={localStyles.inputWrapper}>
+            <Text style={localStyles.label}>Usuario (Email)</Text>
+            <TextInput 
+              style={localStyles.input}
+              placeholder="usuario@inta.gob.ar"
+              autoCapitalize="none"
+              value={email}
+              onChangeText={setEmail}
+            />
+          </View>
+
+          <View style={localStyles.inputWrapper}>
+            <Text style={localStyles.label}>Contraseña</Text>
+            <TextInput 
+              style={localStyles.input}
+              placeholder="********"
+              secureTextEntry
+              value={password}
+              onChangeText={setPassword}
+            />
+          </View>
+
+          <TouchableOpacity 
+            style={[GlobalStyles.primaryButton, loading && { opacity: 0.7 }]} 
+            onPress={handleLogin}
+            disabled={loading}
+          >
+            {loading ? (
+              <ActivityIndicator color="#fff" />
+            ) : (
+              <Text style={GlobalStyles.buttonText}>INGRESAR</Text>
+            )}
+          </TouchableOpacity>
         </View>
-
-        <View style={localStyles.inputWrapper}>
-          <Text style={localStyles.label}>Contraseña</Text>
-          <TextInput 
-            style={localStyles.input}
-            placeholder="********"
-            secureTextEntry
-            value={password}
-            onChangeText={setPassword}
-          />
-        </View>
-
-        <TouchableOpacity 
-          style={[GlobalStyles.primaryButton, loading && { opacity: 0.7 }]} 
-          onPress={handleLogin}
-          disabled={loading}
-        >
-          {loading ? (
-            <ActivityIndicator color="#fff" />
-          ) : (
-            <Text style={GlobalStyles.buttonText}>INGRESAR</Text>
-          )}
-        </TouchableOpacity>
-      </View>
+      </KeyboardAvoidingView>
       
+      {/* 3. Texto Fijo (Fuera del KeyboardAvoidingView) */}
       <Text style={localStyles.versionText}>v0.0.1 - Dev - INTA EEA Catamarca</Text>
-    </KeyboardAvoidingView>
+    </View>
   );
 }
 
 const localStyles = StyleSheet.create({
+  // Nuevo contenedor principal
+  mainContainer: {
+    flex: 1,
+    backgroundColor: Colors.background || '#f2f2f2', // Asegura el color de fondo
+  },
   logoImage: {
     width: 200,
     height: 80,
@@ -129,7 +151,8 @@ const localStyles = StyleSheet.create({
   },
   versionText: {
     position: 'absolute',
-    bottom: 50,
+    bottom: 70, // Ajustado un poco para margen seguro
+    alignSelf: 'center', // Centrado horizontalmente
     color: Colors.textSecondary,
     fontSize: 12
   }

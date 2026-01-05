@@ -3,6 +3,7 @@ import { Stack, useFocusEffect, useLocalSearchParams, useRouter } from "expo-rou
 import React, { useCallback, useEffect, useState } from "react";
 import {
   ActivityIndicator,
+  Alert,
   ScrollView,
   StyleSheet,
   Text,
@@ -20,7 +21,7 @@ import SensorInfoBar from "../../../components/sensor/SensorInfoBar";
 
 // --- LOGICA Y DB ---
 import { getElectrodesBySensor } from "../../../database/ElectrodeRepository";
-import { getSensorById } from "../../../database/SensorRepository";
+import { getSensorById, unlinkSensor } from "../../../database/SensorRepository";
 // ELIMINADO: getLastReadingB01, getLastReadingC01 (Ya no leemos lecturas de SQLite)
 
 import {
@@ -48,6 +49,9 @@ export default function SensorDashboard() {
   // Estado para el último dato (Ahora vendrá de la Nube, no SQLite)
   const [lastReading, setLastReading] = useState<any>(null);
   const [loading, setLoading] = useState(true);
+
+  // AGREGA UN ESTADO PARA EL ROL
+  const [userRole, setUserRole] = useState<string>("guest");
 
   // 1. CARGA DE DATOS
   useFocusEffect(
@@ -111,6 +115,35 @@ export default function SensorDashboard() {
   );
 
   useEffect(() => {
+     const checkRole = async () => {
+        if(!dbSensor) return;
+
+        // 1. Intentar leer del JSON local primero (rápido)
+        try {
+            const config = JSON.parse(dbSensor.config_json || '{}');
+            if(config.role) setUserRole(config.role);
+        } catch {}
+
+        // 2. Si hay internet, verificar el rol real en Supabase (seguro)
+        const { data: { user } } = await supabase.auth.getUser();
+        if (user) {
+            const { data } = await supabase
+                .from('sensor_permissions')
+                .select('role')
+                .eq('device_id', sensorIdStr)
+                .eq('user_id', user.id)
+                .single();
+            
+            if (data?.role) {
+                setUserRole(data.role);
+                // Opcional: Actualizar DB local si el rol cambió
+            }
+        }
+     };
+     checkRole();
+  }, [dbSensor, sensorIdStr]);
+
+  useEffect(() => {
     // Esta función se ejecuta cuando el componente se monta
     return () => {
       // Esta función se ejecuta cuando el componente se DESMONTA (Sales de la pantalla)
@@ -151,6 +184,37 @@ export default function SensorDashboard() {
       }
   };
 
+  // --- ACCIÓN: DESVINCULAR ---
+  const handleUnlinkSensor = () => {
+    const isOwner = userRole === 'owner';
+    const message = isOwner
+      ? "Eres el PROPIETARIO. Si confirmas, perderás el control sobre este sensor y quedará LIBRE para que otro usuario lo registre.\n\nSe borrarán todos los datos de este teléfono."
+      : "Se eliminará el sensor de tu lista local y dejarás de tener acceso a sus datos. El propietario seguirá teniendo acceso.";
+
+    Alert.alert(
+      isOwner ? "Liberar Sensor" : "Desvincular",
+      message,
+      [
+        { text: "Cancelar", style: "cancel" },
+        {
+          text: isOwner ? "Liberar y Borrar" : "Borrar",
+          style: "destructive",
+          onPress: async () => {
+            setLoading(true);
+            // Esta función del repo ahora maneja la lógica de nube + local correctamente
+            const result = await unlinkSensor(sensorIdStr);
+            setLoading(false);
+            
+            if (result.success) {
+              router.replace("/");
+            } else {
+              Alert.alert("Error", "No se pudo eliminar: " + result.error);
+            }
+          },
+        },
+      ]
+    );
+  };
   const formatOfflineDate = (isoString: string) => {
       if (!isoString) return "";
       const d = new Date(isoString);
@@ -188,6 +252,31 @@ export default function SensorDashboard() {
           </View>
         </View>
       </View>
+
+      {/* BADGE DE ROL */}
+       <View style={{ 
+          backgroundColor: userRole === 'owner' ? '#e8f5e9' : '#fff3e0', 
+          paddingVertical: 4, 
+          paddingHorizontal: 16,
+          flexDirection: 'row',
+          justifyContent: 'center',
+          alignItems: 'center',
+          gap: 6
+       }}>
+          <MaterialCommunityIcons 
+             name={userRole === 'owner' ? "shield-check" : "eye-outline"} 
+             size={14} 
+             color={userRole === 'owner' ? "#2e7d32" : "#ef6c00"} 
+          />
+          <Text style={{ 
+             fontSize: 12, 
+             fontWeight: 'bold', 
+             color: userRole === 'owner' ? "#2e7d32" : "#ef6c00",
+             textTransform: 'uppercase'
+          }}>
+             {userRole === 'owner' ? "Administrador (Dueño)" : "Modo Visualizador"}
+          </Text>
+       </View>
 
       {/* BARRA INFO */}
       <SensorInfoBar
@@ -333,6 +422,20 @@ export default function SensorDashboard() {
               <Text style={styles.btnSub}>Verificar sincronización remota</Text>
             </View>
             <MaterialCommunityIcons name="chevron-right" size={24} color="#ccc" />
+          </TouchableOpacity>
+
+          {/* 4. Botón: Eliminar Sensor (Zona Peligrosa) */}
+          <TouchableOpacity
+            style={[styles.actionButton, styles.btnLocal]}
+            onPress={handleUnlinkSensor}
+          >
+            <View style={[styles.iconCircle, { backgroundColor: "#FFEBEE" }]}>
+              <MaterialCommunityIcons name="link-variant-off" size={24} color="#D32F2F" />
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={[styles.btnTitle, { color: "#D32F2F" }]}>Eliminar Sensor</Text>
+              <Text style={styles.btnSub}>Desvincular y borrar datos</Text>
+            </View>
           </TouchableOpacity>
 
         </View>

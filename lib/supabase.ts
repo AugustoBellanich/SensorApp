@@ -1,21 +1,17 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { createClient } from '@supabase/supabase-js';
-import 'react-native-url-polyfill/auto'; // <--- 1. OBLIGATORIO: Esto debe ir primero para que no falle en Android
+import 'react-native-url-polyfill/auto';
 
-// 2. Leemos las variables del archivo .env
+// 1. Leemos con fallback a cadena vacía para evitar CRASH inmediato
 // En Expo, las variables que empiezan con EXPO_PUBLIC_ están disponibles globalmente aquí.
-const supabaseUrl = process.env.EXPO_PUBLIC_SUPABASE_URL;
-const supabaseAnonKey = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY;
-const ingestToken = process.env.EXPO_PUBLIC_INGEST_TOKEN;
-const functionUrl = process.env.EXPO_PUBLIC_SUPABASE_FUNCTION_URL;
+const supabaseUrl = process.env.EXPO_PUBLIC_SUPABASE_URL || "";
+const supabaseAnonKey = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY || "";
+const ingestToken = process.env.EXPO_PUBLIC_INGEST_TOKEN || "";
+const functionUrl = process.env.EXPO_PUBLIC_SUPABASE_FUNCTION_URL || "";
 
-// 3. Validación de seguridad
-// Esto evita que la app crashee con un error raro si te olvidaste de crear el archivo .env
+// 2. Logging para depuración (solo se verá en logs, no crashea la UI)
 if (!supabaseUrl || !supabaseAnonKey) {
-  console.error("❌ ERROR CRÍTICO SUPABASE: Faltan las variables de entorno.");
-  console.error("Asegúrate de crear el archivo .env en la raíz con:");
-  console.error(" - EXPO_PUBLIC_SUPABASE_URL");
-  console.error(" - EXPO_PUBLIC_SUPABASE_ANON_KEY");
+  console.warn("⚠️ ADVERTENCIA: Variables de entorno Supabase no detectadas.");
 }
 
 // 4. Inicializamos el cliente
@@ -29,9 +25,8 @@ export const supabase = createClient(supabaseUrl!, supabaseAnonKey!, {
   },
 });
 
-// 4. EXPORTAMOS LAS CONSTANTES (Opcional pero recomendado)
-// Esto te permite importar 'INGEST_TOKEN' en GatewayConfigScreen limpiamente
-export const SUPABASE_URL = supabaseUrl!;
-export const SUPABASE_ANON_KEY = supabaseAnonKey!;
-export const INGEST_TOKEN = ingestToken || "";
-export const SUPABASE_FUNCTION_URL = functionUrl || "";
+// 4. Exportamos constantes seguras
+export const SUPABASE_URL = supabaseUrl;
+export const SUPABASE_ANON_KEY = supabaseAnonKey;
+export const INGEST_TOKEN = ingestToken;
+export const SUPABASE_FUNCTION_URL = functionUrl;

@@ -20,7 +20,7 @@ import SensorInfoBar from "../../../components/sensor/SensorInfoBar";
 import { BLE_UUIDS } from "../../../constants/BleUUIDs";
 import { Colors } from "../../../constants/Colors";
 import { useBle } from "../../../context/BleContext";
-import { getSensorById } from "../../../database/SensorRepository";
+import { getSensorById, unlinkSensor } from "../../../database/SensorRepository";
 import { SensorEntity } from "../../../database/types";
 // Asegúrate de que la ruta sea correcta según donde creaste el archivo
 import {
@@ -98,6 +98,9 @@ export default function GatewayDashboard() {
   // pero por ahora dejamos el crudo o 0 para la batería del Gateway principal.
   const batteryPercent = isConnected ? sensorData.battery ?? 0 : 0;
 
+
+  const [isDeleting, setIsDeleting] = useState(false);
+
   // --- PARSEO DE LISTA DE SENSORES (LORA) ---
   const loraSensors = useMemo(() => {
     if (!diagnosisStatus.sensorsList) return [];
@@ -110,7 +113,7 @@ export default function GatewayDashboard() {
           // raw[key] trae: { type, last, bat, v1, v2, v3 }
         }))
         .sort((a: any, b: any) => b.last - a.last);
-    } catch (_) {
+    } catch {
       return [];
     }
   }, [diagnosisStatus.sensorsList]);
@@ -129,9 +132,42 @@ export default function GatewayDashboard() {
         "Comando Enviado",
         "El Gateway intentará subir los datos pendientes ahora."
       );
-    } catch (_) {
+    } catch {
       Alert.alert("Error", "No se pudo enviar el comando.");
     }
+  };
+
+  const handleUnlink = () => {
+    Alert.alert(
+      "Desvincular Gateway",
+      "¿Estás seguro? Se eliminará el dispositivo de la App y sus datos locales.\n\n(Si hay internet, también se desvinculará de la nube).",
+      [
+        { text: "Cancelar", style: "cancel" },
+        {
+          text: "Eliminar",
+          style: "destructive",
+          onPress: async () => {
+            setIsDeleting(true);
+            try {
+              if (connectedDevice) await disconnectDevice(); // Desconectar primero
+              
+              const result = await unlinkSensor(sensorIdStr); // Borrar DB
+              
+              if (result.success) {
+                router.replace("/"); // Volver al inicio
+              } else {
+                Alert.alert("Error", "No se pudo eliminar: " + result.error);
+              }
+            } catch (error) {
+              console.error(error);
+              Alert.alert("Error", "Fallo al eliminar.");
+            } finally {
+              setIsDeleting(false);
+            }
+          },
+        },
+      ]
+    );
   };
 
   return (
@@ -275,6 +311,21 @@ export default function GatewayDashboard() {
             <Text style={styles.actionTitle}>Forzar Subida</Text>
           </TouchableOpacity>
         </View>
+
+        <TouchableOpacity
+          style={styles.deleteButton}
+          onPress={handleUnlink}
+          disabled={isDeleting}
+        >
+          {isDeleting ? (
+            <ActivityIndicator color="#d32f2f" />
+          ) : (
+            <>
+              <MaterialCommunityIcons name="delete-outline" size={22} color="#d32f2f" />
+              <Text style={styles.deleteButtonText}>Desvincular Dispositivo</Text>
+            </>
+          )}
+        </TouchableOpacity>
 
         {/* 3. SENSORES LORA DETECTADOS */}
         <Text style={styles.sectionHeader}>Sensores en Campo (LoRa)</Text>
@@ -511,6 +562,23 @@ const styles = StyleSheet.create({
     paddingVertical: 2,
     borderRadius: 4,
     marginLeft: 8,
+  },
+  deleteButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#ffebee", // Rojo muy claro de fondo
+    padding: 12,
+    borderRadius: 12,
+    marginTop: 10,
+    gap: 8,
+    borderWidth: 1,
+    borderColor: "#ffcdd2",
+  },
+  deleteButtonText: {
+    color: "#d32f2f", // Rojo fuerte
+    fontWeight: "bold",
+    fontSize: 14,
   },
   sensorTypeText: { fontSize: 10, fontWeight: "bold", color: Colors.primary },
   sensorTime: { fontSize: 12, color: "#888" },

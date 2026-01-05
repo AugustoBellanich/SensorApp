@@ -23,6 +23,20 @@ const LAST_PULL_KEY = "LAST_SYNC_TIMESTAMP";
 // SEMÁFORO
 let isSyncing = false;
 
+// Helper para verificar rol antes de subir
+const getUserRole = async (deviceId: string): Promise<'owner' | 'editor' | 'viewer' | null> => {
+    try {
+        const { data } = await supabase
+            .from('sensor_permissions')
+            .select('role')
+            .eq('device_id', deviceId)
+            .single();
+        return data?.role || null;
+    } catch {
+        return null;
+    }
+};
+
 export const syncService = {
   async isOnline(): Promise<boolean> {
     const state = await NetInfo.fetch();
@@ -30,7 +44,7 @@ export const syncService = {
   },
 
   // ==============================================================================
-  // 1. PUSH (SUBIDA: Local -> Nube) 
+  // 1. PUSH (SUBIDA: Local -> Nube) - CON CHECK DE ROL
   // ==============================================================================
   async pushChanges() {
     console.log("🔄 [SYNC] Iniciando subida de datos...");
@@ -40,14 +54,21 @@ export const syncService = {
         return;
     }
 
-    // A. SUBIR SENSORES (Aquí SI actualizamos si ya existe, por si cambiaste el alias)
+    // A. SUBIR SENSORES (Solo Owners/Editores pueden cambiar config/alias en nube)
     try {
         const pendingSensors = await getSensorsPendingSync();
         if (pendingSensors.length > 0) {
-            console.log(`📤 [SYNC] Subiendo ${pendingSensors.length} sensores...`);
+            console.log(`📤 [SYNC] Verificando ${pendingSensors.length} sensores pendientes...`);
             for (const sensor of pendingSensors) {
                 const cleanId = sensor.id.replace("SEN-", "").trim(); 
                 
+                // CHECK DE ROL
+                const role = await getUserRole(cleanId);
+                if (role !== 'owner' && role !== 'editor') {
+                    console.log(`🔒 [SYNC] Rol '${role}' en ${cleanId}. No se sube config.`);
+                    continue; 
+                }
+
                 const { error } = await supabase.from("devices").upsert({
                     id: cleanId,
                     alias: sensor.alias,
@@ -58,7 +79,7 @@ export const syncService = {
                     lng: sensor.lng,
                     config: JSON.parse(sensor.config_json || "{}"),
                     last_sync: new Date().toISOString(),
-                }); // Sin ignoreDuplicates, para que actualice cambios
+                });
 
                 if (error) console.error(`❌ [SYNC] Error sensor ${cleanId}:`, error.message);
                 else await markSensorSynced(sensor.id);
@@ -66,15 +87,26 @@ export const syncService = {
         }
     } catch (e) { console.error("❌ [SYNC] Error sensores:", e); }
 
-    // B. SUBIR ELECTRODOS (También actualizamos calibraciones)
+    // B. SUBIR ELECTRODOS
     try {
         const pendingElectrodes = await db.getAllAsync<ElectrodeEntity>(
             "SELECT * FROM device_electrodes WHERE is_synced = 0"
         );
-        if (pendingElectrodes.length > 0) {
-            const electrodesPayload = pendingElectrodes.map(elec => ({
+        // Agrupamos por sensor para no consultar rol por cada electrodo
+        const uniqueSensors = [...new Set(pendingElectrodes.map(e => e.sensor_id))];
+
+        for (const rawSensorId of uniqueSensors) {
+            const cleanId = rawSensorId.replace("SEN-", "").trim();
+            const role = await getUserRole(cleanId);
+            
+            if (role !== 'owner' && role !== 'editor') continue;
+
+            // Filtramos electrodos de este sensor
+            const electrodesBatch = pendingElectrodes.filter(e => e.sensor_id === rawSensorId);
+            
+            const payload = electrodesBatch.map(elec => ({
                 id: elec.id,
-                device_id: elec.sensor_id.replace("SEN-", "").trim(),
+                device_id: cleanId,
                 electrode_index: elec.electrode_index,
                 depth: elec.depth,
                 texture: elec.texture,
@@ -83,28 +115,39 @@ export const syncService = {
                 equations_json: JSON.parse(elec.equations_json || "[]"),
                 updated_at: new Date().toISOString()
             }));
-            
-            const { error } = await supabase.from("device_electrodes").upsert(electrodesPayload);
+
+            const { error } = await supabase.from("device_electrodes").upsert(payload);
             if (!error) {
-                for (const elec of pendingElectrodes) await markElectrodeSynced(elec.id);
-            } else {
-                console.error("❌ [SYNC] Error electrodos:", error.message);
+                for (const elec of electrodesBatch) await markElectrodeSynced(elec.id);
             }
         }
     } catch (e) { console.error("❌ [SYNC] Error electrodos:", e); }
 
-    // C. SUBIR LECTURAS B01 (SUELO) - OPTIMIZADO: IGNORAR DUPLICADOS
+    // C. SUBIR LECTURAS B01 (SUELO)
     try {
         const pendingReadings = await db.getAllAsync<ReadingB01>(
             "SELECT * FROM readings_b01 WHERE is_synced = 0 LIMIT 50"
         );
         
         if (pendingReadings.length > 0) {
-            console.log(`📤 [SYNC] Subiendo ${pendingReadings.length} lecturas B01...`);
-            
-            const payload = pendingReadings.map(r => {
-                const cleanId = r.sensor_id.replace("SEN-", "").trim();
-                return {
+            // Agrupar por sensor
+            const sensorsInBatch = [...new Set(pendingReadings.map(r => r.sensor_id))];
+
+            for (const rawSensorId of sensorsInBatch) {
+                const cleanId = rawSensorId.replace("SEN-", "").trim();
+                
+                // 1. CHECK DE ROL: Si soy Viewer, NO subo.
+                const role = await getUserRole(cleanId);
+                if (role !== 'owner' && role !== 'editor') {
+                    console.log(`🔒 [SYNC] Salteando B01 para ${cleanId} (Rol: ${role}).`);
+                    continue; 
+                }
+
+                // 2. Preparar Payload solo para este sensor
+                const batch = pendingReadings.filter(r => r.sensor_id === rawSensorId);
+                console.log(`📤 [SYNC] Subiendo ${batch.length} lecturas B01 para ${cleanId}...`);
+
+                const payload = batch.map(r => ({
                     device_id: cleanId,
                     sensor_id: cleanId,
                     sensor_type: 'B01',
@@ -112,35 +155,44 @@ export const syncService = {
                     soil_temp: r.soil_temp,
                     e1_mv: r.e1_mv, e2_mv: r.e2_mv, e3_mv: r.e3_mv,
                     battery_mv: r.battery_mv
-                };
-            });
+                }));
 
-            const { error } = await supabase.from('readings_b01').upsert(payload, { 
-                // CAMBIO AQUÍ: Usamos sensor_id en lugar de device_id
-                onConflict: 'sensor_id, timestamp', 
-                ignoreDuplicates: true 
-            });
-            
-            if (!error) {
-                const ids = pendingReadings.map(r => r.id).join(',');
-                await db.runAsync(`UPDATE readings_b01 SET is_synced = 1 WHERE id IN (${ids})`);
-                console.log("✅ [SYNC] Lecturas B01 procesadas (Duplicados ignorados).");
-            } else {
-                console.error("❌ [SYNC] Error subiendo B01:", error.message);
+                const { error } = await supabase.from('readings_b01').upsert(payload, { 
+                    onConflict: 'sensor_id, timestamp', 
+                    ignoreDuplicates: true 
+                });
+                
+                if (!error) {
+                    const ids = batch.map(r => r.id).join(',');
+                    await db.runAsync(`UPDATE readings_b01 SET is_synced = 1 WHERE id IN (${ids})`);
+                    console.log("✅ [SYNC] B01 subido.");
+                } else {
+                    console.error("❌ [SYNC] Error B01:", error.message);
+                }
             }
         }
     } catch (e) { console.error("❌ [SYNC] Error lecturas B01:", e); }
 
-    // D. SUBIR LECTURAS C01 (CLIMA) - OPTIMIZADO: IGNORAR DUPLICADOS
+    // D. SUBIR LECTURAS C01 (CLIMA)
     try {
         const pendingReadings = await db.getAllAsync<ReadingC01>(
             "SELECT * FROM readings_c01 WHERE is_synced = 0 LIMIT 50"
         );
         
         if (pendingReadings.length > 0) {
-            const payload = pendingReadings.map(r => {
-                const cleanId = r.sensor_id.replace("SEN-", "").trim();
-                return {
+            const sensorsInBatch = [...new Set(pendingReadings.map(r => r.sensor_id))];
+
+            for (const rawSensorId of sensorsInBatch) {
+                const cleanId = rawSensorId.replace("SEN-", "").trim();
+                const role = await getUserRole(cleanId);
+                
+                if (role !== 'owner' && role !== 'editor') {
+                    console.log(`🔒 [SYNC] Salteando C01 para ${cleanId} (Rol: ${role}).`);
+                    continue;
+                }
+
+                const batch = pendingReadings.filter(r => r.sensor_id === rawSensorId);
+                const payload = batch.map(r => ({
                     device_id: cleanId,
                     sensor_id: cleanId,
                     sensor_type: 'C01',
@@ -148,26 +200,25 @@ export const syncService = {
                     air_temp: r.air_temp,
                     humidity: r.humidity,
                     battery_mv: r.battery_mv
-                };
-            });
+                }));
 
-            const { error } = await supabase.from('readings_c01').upsert(payload, {
-                // CAMBIO AQUÍ: Usamos sensor_id en lugar de device_id
-                onConflict: 'sensor_id, timestamp',
-                ignoreDuplicates: true
-            });
-            
-            if (!error) {
-                const ids = pendingReadings.map(r => r.id).join(',');
-                await db.runAsync(`UPDATE readings_c01 SET is_synced = 1 WHERE id IN (${ids})`);
-                console.log("✅ [SYNC] Lecturas C01 procesadas (Duplicados ignorados).");
-            } else {
-                console.error("❌ [SYNC] Error subiendo C01:", error.message);
+                const { error } = await supabase.from('readings_c01').upsert(payload, {
+                    onConflict: 'sensor_id, timestamp',
+                    ignoreDuplicates: true
+                });
+                
+                if (!error) {
+                    const ids = batch.map(r => r.id).join(',');
+                    await db.runAsync(`UPDATE readings_c01 SET is_synced = 1 WHERE id IN (${ids})`);
+                    console.log("✅ [SYNC] C01 subido.");
+                } else {
+                    console.error("❌ [SYNC] Error C01:", error.message);
+                }
             }
         }
     } catch (e) { console.error("❌ [SYNC] Error lecturas C01:", e); }
   },
-
+  
   // ==============================================================================
   // 2. PULL (BAJADA: Nube -> Local)
   // ==============================================================================

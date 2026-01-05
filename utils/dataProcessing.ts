@@ -3,7 +3,7 @@
 export const calculateMedian = (values: number[]): number => {
     if (values.length === 0) return 0;
     
-    // Ordenar numéricamente para encontrar el centro
+    // Ordenamos de menor a mayor
     const sorted = [...values].sort((a, b) => a - b);
     const mid = Math.floor(sorted.length / 2);
     
@@ -13,6 +13,12 @@ export const calculateMedian = (values: number[]): number => {
     return sorted[mid];
 };
 
+/**
+ * Reduce la cantidad de puntos agrupándolos por intervalo de tiempo.
+ * @param data Array de datos crudos
+ * @param key La propiedad a leer (ej: 'soil_temp', 'v1')
+ * @param intervalMs El tamaño de la ventana de tiempo en ms (ej: 3600000 para 1h)
+ */
 export const downsampleData = (data: any[], key: string, intervalMs: number): any[] => {
     if (!data || data.length === 0) return [];
 
@@ -22,18 +28,20 @@ export const downsampleData = (data: any[], key: string, intervalMs: number): an
     data.forEach(item => {
         let val = item[key];
         
-        if (val === undefined || val === null) return;
+        // Validación numérica estricta
+        if (val === undefined || val === null || val === "") return;
         val = Number(val);
-        
-        // --- FILTRO DE CALIDAD ---
-        // Si el valor es exactamente 0, lo consideramos error de lectura y lo saltamos.
-        // (A menos que tu sensor realmente mida 0 absoluto, lo cual es raro en agricultura)
-        if (isNaN(val) || val === 0) return; 
+        if (isNaN(val)) return;
 
-        const tsNum = new Date(item.timestamp).getTime();
-        if (isNaN(tsNum)) return;
+        // FILTRO DE CALIDAD: Ignoramos 0 absoluto si no es lógico (opcional)
+        // if (val === 0) return; 
 
-        const bucket = Math.floor(tsNum / intervalMs) * intervalMs;
+        const tsRaw = new Date(item.timestamp).getTime();
+        if (isNaN(tsRaw)) return;
+
+        // "Redondeamos" el tiempo al inicio del intervalo (Bucket)
+        // Ej: 14:15, 14:30, 14:45 -> Todos caen en la cubeta de las 14:00
+        const bucket = Math.floor(tsRaw / intervalMs) * intervalMs;
         
         if (!grouped[bucket]) {
             grouped[bucket] = [];
@@ -42,97 +50,65 @@ export const downsampleData = (data: any[], key: string, intervalMs: number): an
         grouped[bucket].push(val);
     });
 
+    // Ordenamos cronológicamente
     timestamps.sort((a, b) => a - b);
 
+    // Generamos el array reducido
     return timestamps.map(ts => {
         return {
-            timestamp: ts,
-            value: calculateMedian(grouped[ts]), 
-            originalCount: grouped[ts].length 
+            timestamp: ts, // Usamos el inicio del intervalo como marca de tiempo
+            value: calculateMedian(grouped[ts]), // El valor es la MEDIANA de ese periodo
+            originalCount: grouped[ts].length // (Debug) Cuántos puntos reales formaron este punto
         };
     });
 };
 
 // --- RELLENO DE HUECOS (MODO UNIR SIEMPRE) ---
+// Rellena huecos de tiempo vacíos para que la gráfica no corte la línea
 export const fillTimeGaps = (
-  data: any[], 
-  intervalMs: number, 
-  start: Date, 
-  end: Date
+    data: any[], 
+    intervalMs: number, 
+    startDate: Date, 
+    endDate: Date
 ): any[] => {
     if (!data || data.length === 0) return [];
 
     const filledData: any[] = [];
     const dataMap = new Map();
-    const timestamps: number[] = [];
-
-    // 1. Indexar datos
-    data.forEach(item => {
-        const bucket = Math.floor(item.timestamp / intervalMs) * intervalMs;
-        dataMap.set(bucket, item);
-        timestamps.push(bucket);
-    });
-
-    if (timestamps.length === 0) return [];
-
-    // 2. Definir límites basados en DATOS REALES (Evita líneas al inicio/fin vacíos)
-    const firstRealTs = Math.min(...timestamps);
-    const lastRealTs = Math.max(...timestamps);
-
-    let currentTs = firstRealTs;
     
-    // Estado para interpolación
-    let lastValidValue = dataMap.get(currentTs).value;
-    let lastValidTs = currentTs; 
+    data.forEach(item => dataMap.set(item.timestamp, item));
 
-    while (currentTs <= lastRealTs) {
+    const startTs = Math.floor(startDate.getTime() / intervalMs) * intervalMs;
+    const endTs = Math.floor(endDate.getTime() / intervalMs) * intervalMs;
+
+    let currentTs = startTs;
+    // Buscamos el primer dato real para no inventar línea al principio
+    const firstReal = data[0].timestamp; 
+    
+    // Si el rango empieza antes del primer dato, avanzamos hasta el primer dato
+    if (currentTs < firstReal) currentTs = firstReal;
+
+    while (currentTs <= endTs) {
         if (dataMap.has(currentTs)) {
-            // CASO A: DATO REAL
-            const realItem = dataMap.get(currentTs);
-            lastValidValue = realItem.value;
-            lastValidTs = currentTs;
-
+            // DATO REAL
             filledData.push({
-                ...realItem,
-                timestamp: currentTs,
-                hideDataPoint: false,
+                ...dataMap.get(currentTs),
+                hideDataPoint: false
             });
         } else {
-            // CASO B: HUECO (Siempre interpolamos, nunca cortamos)
-            
-            // Buscar siguiente dato
-            let nextValidValue = lastValidValue;
-            let nextValidTs = currentTs;
-            let foundNext = false;
-            let lookAheadTs = currentTs + intervalMs;
-            
-            while(lookAheadTs <= lastRealTs && !foundNext) {
-                if (dataMap.has(lookAheadTs)) {
-                    nextValidValue = dataMap.get(lookAheadTs).value;
-                    nextValidTs = lookAheadTs;
-                    foundNext = true;
-                }
-                lookAheadTs += intervalMs;
+            // HUECO: Interpolación visual (opcional) o punto oculto
+            // Aquí repetimos el último valor conocido pero lo marcamos como oculto
+            // para mantener la continuidad de la línea sin poner un punto falso.
+            const lastItem = filledData[filledData.length - 1];
+            if (lastItem) {
+                filledData.push({
+                    timestamp: currentTs,
+                    value: lastItem.value, // Mantenemos valor visualmente
+                    label: "",
+                    hideDataPoint: true,   // Ocultamos el punto
+                    isInterpolated: true
+                });
             }
-
-            let calculatedValue = lastValidValue;
-            
-            // Si encontramos un futuro, hacemos una línea recta hacia él
-            if (foundNext) {
-                const totalDuration = nextValidTs - lastValidTs;
-                const elapsed = currentTs - lastValidTs;
-                const factor = elapsed / totalDuration;
-                calculatedValue = lastValidValue + (nextValidValue - lastValidValue) * factor;
-            }
-
-            filledData.push({
-                timestamp: currentTs,
-                value: calculatedValue,
-                label: '', 
-                hideDataPoint: true, // Punto invisible para que parezca una línea continua
-                stripHeight: 0,
-                dataPointRadius: 0,
-            });
         }
         currentTs += intervalMs;
     }
