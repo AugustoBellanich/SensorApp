@@ -36,7 +36,8 @@ import {
 
 // Utils
 import { calculateMoistureFromSegments } from "../../../utils/calibration";
-import { calculateMedian, downsampleData } from "../../../utils/dataProcessing";
+// FUNCIONES OPTIMIZADAS
+import { calculateMedian, downsampleData, fillTimeGaps, formatForExcel } from "../../../utils/dataProcessing";
 import { getAgronomicLines } from "../../../utils/referenceLines";
 
 // --- IMPORTANTE: CLIENTE SUPABASE ---
@@ -47,9 +48,9 @@ type ViewMode = "optimized" | "real";
 
 // --- CONSTANTES AGRONÓMICAS ---
 const CLIMATE_LINES = [
-  { value: 0, label: 'Helada', color: '#4FC3F7' },     // Azul claro
-  { value: 7.2, label: 'Hora Frío', color: '#1E88E5' }, // Azul medio
-  { value: 35, label: 'Calor Ext.', color: '#FF7043' }  // Naranja
+  { value: 0, label: 'Helada', color: '#4FC3F7' },     
+  { value: 7.2, label: 'Hora Frío', color: '#1E88E5' }, 
+  { value: 35, label: 'Calor Ext.', color: '#FF7043' }  
 ];
 
 export default function CloudDataScreen() {
@@ -63,9 +64,9 @@ export default function CloudDataScreen() {
   const [loadingMessage, setLoadingMessage] = useState("");
   const [sensorDb, setSensorDb] = useState<SensorEntity | null>(null);
 
-  // Filtros Fecha
+  // Filtros Fecha (Default 7 días)
   const [dateStart, setDateStart] = useState(
-    new Date(new Date().setDate(new Date().getDate() - 1))
+    new Date(new Date().setDate(new Date().getDate() - 7))
   );
   const [dateEnd, setDateEnd] = useState(new Date());
   const [showPicker, setShowPicker] = useState<"start" | "end" | null>(null);
@@ -73,9 +74,15 @@ export default function CloudDataScreen() {
   // Configs Visualización
   const [viewMode, setViewMode] = useState<ViewMode>("optimized");
   const [unit, setUnit] = useState<UnitType>("% Hv");
-  const [spacing, setSpacing] = useState<number>(30);
+  const [spacing, setSpacing] = useState<number>(40);
 
-  // Configuración de Electrodos (La leemos local para aplicar calibración a los datos nube)
+  // CONFIGURACIÓN DINÁMICA DEL GRÁFICO
+  const [chartSettings, setChartSettings] = useState({ 
+      intervalMs: 3600000, 
+      labelFormat: 'hour' // 'hour' | 'day-hour' | 'day' | 'date'
+  });
+
+  // Configuración de Electrodos
   const [electrodesInfo, setElectrodesInfo] = useState<Record<number, ElectrodeEntity>>({});
   const [electrodeConfig, setElectrodeConfig] = useState<Record<number, LinearSegment[]>>({});
   const [densities, setDensities] = useState<Record<number, number>>({});
@@ -87,7 +94,7 @@ export default function CloudDataScreen() {
   const [soilTempData, setSoilTempData] = useState<any>(null);
   const [climateData, setClimateData] = useState<any>(null);
   
-  // ESTADO NUEVO: Indicadores Agronómicos
+  // Indicadores Agronómicos
   const [agroStats, setAgroStats] = useState({ chill: 0, frost: 0, heat: 0 });
 
   // 1. Init: Cargar Configuración Local del Sensor
@@ -121,35 +128,72 @@ export default function CloudDataScreen() {
     loadConfig();
   }, [sensorId]);
 
-  // --- HELPERS VISUALES (Iguales a LocalData) ---
-  const formatChart = useCallback(
-    (arr: any[]) => {
-      if (!arr || arr.length === 0) return [];
-      const pixelsPerLabel = 60;
-      let step = Math.ceil(pixelsPerLabel / spacing);
-      if (step < 1) step = 1;
-      let lastDateString = "";
+  // --- LÓGICA DE OPTIMIZACIÓN DE DATOS (Igual a SD/Local) ---
+  const optimizeChartSettings = (rawData: any[]) => {
+      if (!rawData || rawData.length === 0) {
+          return { intervalMs: 3600000, labelFormat: 'hour' };
+      }
 
-      return arr.map((p, index) => {
+      const timestamps = rawData.map(d => new Date(d.timestamp).getTime());
+      const minTs = Math.min(...timestamps);
+      const maxTs = Math.max(...timestamps);
+      const totalDurationMs = maxTs - minTs;
+
+      const TARGET_POINTS = 70; 
+      let calculatedInterval = totalDurationMs / TARGET_POINTS;
+
+      const MIN_15 = 15 * 60 * 1000;
+      const HOUR_1 = 60 * 60 * 1000;
+      const HOUR_4 = 4 * HOUR_1;
+      const HOUR_12 = 12 * HOUR_1;
+      const DAY_1 = 24 * HOUR_1;
+
+      let finalInterval = HOUR_1; 
+      let labelFmt = 'hour';
+
+      if (calculatedInterval <= MIN_15) {
+          finalInterval = MIN_15; 
+          labelFmt = 'hour';
+      } else if (calculatedInterval <= HOUR_1) {
+          finalInterval = HOUR_1; 
+          labelFmt = 'hour';
+      } else if (calculatedInterval <= HOUR_4) {
+          finalInterval = HOUR_4; 
+          labelFmt = 'day-hour'; 
+      } else if (calculatedInterval <= HOUR_12) {
+          finalInterval = HOUR_12; 
+          labelFmt = 'day'; 
+      } else {
+          finalInterval = DAY_1; 
+          labelFmt = 'date'; 
+      }
+
+      return { intervalMs: finalInterval, labelFormat: labelFmt };
+  };
+
+  // --- HELPERS VISUALES ---
+  const formatChart = useCallback(
+    (arr: any[], format: string) => {
+      if (!arr || arr.length === 0) return [];
+      
+      return arr.map((p) => {
+        if (p.hideDataPoint) return { value: p.value, label: "", hideDataPoint: true, dataPointRadius: 0, stripHeight: 0 };
+        
         const val = Number(p.value);
         if (isNaN(val)) return { value: 0, label: "" };
-        const ts = new Date(p.timestamp).getTime();
-        const d = new Date(ts);
+        
+        const d = new Date(p.timestamp);
         let label = "";
-        if (index % step === 0 || index === arr.length - 1) {
-          const dateStr = d.getDate() + "/" + (d.getMonth() + 1);
-          const timeStr = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-          if (dateStr !== lastDateString) {
-            label = `${dateStr}\n${timeStr}`;
-            lastDateString = dateStr;
-          } else {
-            label = timeStr;
-          }
-        }
+        
+        if (format === 'hour') label = d.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+        else if (format === 'day-hour') label = `${d.getDate()} ${d.getHours()}h`;
+        else if (format === 'day') label = `${d.getDate()}/${d.getMonth()+1}`;
+        else label = `${d.getDate()}/${d.getMonth()+1}`; 
+
         return { value: val, label };
       });
     },
-    [spacing]
+    []
   );
 
   const calcStats = useCallback((arr: any[]) => {
@@ -165,6 +209,11 @@ export default function CloudDataScreen() {
   // --- PROCESAMIENTO B01 ---
   const processB01 = useCallback(
     (data: any[]) => {
+      // 1. Configuración Óptima
+      const settings = optimizeChartSettings(data);
+      setChartSettings(settings);
+      const { intervalMs, labelFormat } = settings;
+
       const processed = data.map((d) => {
         const mv1 = Number(d.e1_mv);
         const mv2 = Number(d.e2_mv);
@@ -185,20 +234,32 @@ export default function CloudDataScreen() {
         return { ...d, v1, v2, v3 };
       });
 
+      // Grilla temporal
+      const timestamps = processed.map(d => new Date(d.timestamp).getTime());
+      const minTs = Math.min(...timestamps);
+      const maxTs = Math.max(...timestamps);
+      const startDate = new Date(Math.floor(minTs / intervalMs) * intervalMs);
+      const endDate = new Date(Math.ceil(maxTs / intervalMs) * intervalMs);
+
       const prep = (key: string) => {
         let finalData;
+        let stats;
         const validData = processed.filter((p) => {
           const v = p[key];
           return v !== undefined && v !== null && !isNaN(v) && v > 0;
         });
 
         if (viewMode === "optimized") {
-          const interval = 3600 * 1000;
-          finalData = downsampleData(validData, key, interval);
+          const downsampled = downsampleData(validData, key, intervalMs);
+          stats = calcStats(downsampled);
+          const filled = fillTimeGaps(downsampled, intervalMs, startDate, endDate);
+          finalData = formatChart(filled, labelFormat);
         } else {
-          finalData = validData.map((p) => ({ timestamp: p.timestamp, value: p[key] }));
+          const mapped = validData.map((p) => ({ timestamp: p.timestamp, value: p[key] }));
+          finalData = formatChart(mapped, 'hour'); // Modo real asume detalle
+          stats = calcStats(mapped);
         }
-        return { data: formatChart(finalData), stats: calcStats(finalData) };
+        return { data: finalData, stats };
       };
 
       setElectrodesData({ 1: prep("v1"), 2: prep("v2"), 3: prep("v3") });
@@ -210,67 +271,84 @@ export default function CloudDataScreen() {
   // --- PROCESAMIENTO C01 ---
   const processC01 = useCallback(
     (data: any[]) => {
+      // 1. Horas Agronómicas (Datos crudos)
+      // En la nube, los datos pueden venir irregulares. Calculamos delta real entre puntos.
+      let chill = 0, frost = 0, heat = 0;
+      
+      const sorted = [...data].sort((a,b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+
+      for (let i = 1; i < sorted.length; i++) {
+         const t1 = new Date(sorted[i-1].timestamp).getTime();
+         const t2 = new Date(sorted[i].timestamp).getTime();
+         const hours = (t2 - t1) / 3600000; 
+
+         if (hours > 24) continue; // Si hay un hueco > 1 día, no sumamos horas fantasma
+
+         const t = Number(sorted[i].air_temp);
+         if (t !== undefined && !isNaN(t)) {
+             if (t > 0 && t <= 7.2) chill += hours;
+             if (t <= 0) frost += hours;
+             if (t >= 35) heat += hours;
+         }
+      }
+      
+      setAgroStats({ 
+          chill: Number(chill.toFixed(1)), 
+          frost: Number(frost.toFixed(1)), 
+          heat: Number(heat.toFixed(1)) 
+      });
+
+      // 2. Gráficos
+      const settings = optimizeChartSettings(data);
+      setChartSettings(settings);
+      const { intervalMs, labelFormat } = settings;
+
+      const timestamps = data.map(d => new Date(d.timestamp).getTime());
+      const minTs = Math.min(...timestamps);
+      const maxTs = Math.max(...timestamps);
+      const startDate = new Date(Math.floor(minTs / intervalMs) * intervalMs);
+      const endDate = new Date(Math.ceil(maxTs / intervalMs) * intervalMs);
+
       const prep = (key: string) => {
         let finalData;
+        let stats;
         const validData = data.filter((p) => {
           const v = p[key];
           return v !== undefined && v !== null && !isNaN(v) && v > 0; 
         });
 
         if (viewMode === "optimized") {
-          const interval = 3600 * 1000;
-          finalData = downsampleData(validData, key, interval);
+          const downsampled = downsampleData(validData, key, intervalMs);
+          stats = calcStats(downsampled);
+          const filled = fillTimeGaps(downsampled, intervalMs, startDate, endDate);
+          finalData = formatChart(filled, labelFormat);
         } else {
-          finalData = validData.map((p) => ({ timestamp: p.timestamp, value: p[key] }));
+          const mapped = validData.map((p) => ({ timestamp: p.timestamp, value: p[key] }));
+          finalData = formatChart(mapped, 'hour');
+          stats = calcStats(mapped);
         }
-        return { data: formatChart(finalData), stats: calcStats(finalData) };
+        return { data: finalData, stats };
       };
       
       setClimateData({ temp: prep("air_temp"), hum: prep("humidity") });
-
-      // LÓGICA DE CÁLCULO AGRONÓMICO
-      let chill = 0, frost = 0, heat = 0;
-      
-      // Ordenar por fecha para calcular diferenciales
-      const sorted = [...data].sort((a,b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
-
-      for (let i = 1; i < sorted.length; i++) {
-         const t1 = new Date(sorted[i-1].timestamp).getTime();
-         const t2 = new Date(sorted[i].timestamp).getTime();
-         const hours = (t2 - t1) / 3600000; // Diferencia en horas
-
-         if (hours > 24) continue; // Saltar huecos grandes
-
-         const t = Number(sorted[i].air_temp);
-         if (t > 0 && t <= 7.2) chill += hours;
-         if (t <= 0) frost += hours;
-         if (t >= 35) heat += hours;
-      }
-      
-      setAgroStats({ chill, frost, heat });
     },
     [formatChart, calcStats, viewMode]
   );
 
   const processData = useCallback(
     (data: any[], type: "B01" | "C01") => {
-      if (data.length > 500) { 
-          setLoading(true);
-          setLoadingMessage("Procesando gráficos...");
-          setTimeout(() => {
-              if (type === "B01") processB01(data);
-              else processC01(data);
-              setLoading(false);
-          }, 50);
-      } else {
+      setLoading(true);
+      setLoadingMessage("Procesando gráficos...");
+      setTimeout(() => {
           if (type === "B01") processB01(data);
           else processC01(data);
-      }
+          setLoading(false);
+      }, 50);
     },
     [processB01, processC01]
   );
 
-  // --- CONSULTA A SUPABASE (NUBE) ---
+  // --- CONSULTA A SUPABASE ---
   const handleSearchData = useCallback(
     async (sensor: SensorEntity, start: Date, end: Date) => {
       if (sensor.type !== "B01" && sensor.type !== "C01") return;
@@ -284,7 +362,6 @@ export default function CloudDataScreen() {
         const type = sensor.type as "B01" | "C01";
         const tableName = type === 'B01' ? 'readings_b01' : 'readings_c01';
 
-        // Consulta a Supabase
         const { data, error } = await supabase
             .from(tableName)
             .select('*')
@@ -292,7 +369,7 @@ export default function CloudDataScreen() {
             .gte('timestamp', s.toISOString())
             .lte('timestamp', e.toISOString())
             .order('timestamp', { ascending: true })
-            .limit(2000); 
+            .limit(2000); // Límite de seguridad
 
         if (error) throw error;
         
@@ -338,7 +415,7 @@ export default function CloudDataScreen() {
       const isB01 = sensorDb?.type === "B01";
       const dataToExport = cloudData.map((item) => {
         const row: any = {
-          Fecha: new Date(item.timestamp).toLocaleString("es-AR"),
+          Fecha: formatForExcel(item.timestamp),
         };
         if (isB01) {
           row["Temp. Suelo"] = item.soil_temp;
@@ -360,13 +437,15 @@ export default function CloudDataScreen() {
       const wb = XLSX.utils.book_new();
       XLSX.utils.book_append_sheet(wb, ws, "Datos Nube");
       const wbout = XLSX.write(wb, { type: "base64", bookType: "xlsx" });
+      
       // @ts-ignore
-      const uri = FileSystem.cacheDirectory + `Nube_${sensorId}.xlsx`;
-      await FileSystem.writeAsStringAsync(uri, wbout, { encoding: "base64" });
+      const fs = FileSystem; const dir = fs.documentDirectory || fs.cacheDirectory;
+      const uri = dir + `Nube_${sensorId}.xlsx`;
+      await fs.writeAsStringAsync(uri, wbout, { encoding: "base64" });
       
       setLoading(false);
       if (await Sharing.isAvailableAsync()) await Sharing.shareAsync(uri);
-    } catch (e) {
+    } catch {
       setLoading(false);
       Alert.alert("Error", "Falló la exportación");
     }
@@ -421,7 +500,7 @@ export default function CloudDataScreen() {
           </TouchableOpacity>
         </View>
 
-        {/* Toolbar (Solo Excel, sin borrar) */}
+        {/* Toolbar */}
         {cloudData.length > 0 && (
           <View style={styles.toolbar}>
             <TouchableOpacity style={[styles.toolBtn, { backgroundColor: "#E8F5E9", flex: 1 }]} onPress={handleExportExcel} disabled={loading}>
@@ -466,6 +545,31 @@ export default function CloudDataScreen() {
           </View>
         )}
 
+        {/* PANEL AGRO (C01) */}
+        {sensorDb?.type === "C01" && cloudData.length > 0 && (
+            <View style={styles.agroPanel}>
+                <View style={styles.agroItem}>
+                    <MaterialCommunityIcons name="snowflake" size={24} color="#1E88E5" />
+                    <Text style={styles.agroValue}>{Math.round(agroStats.chill)} h</Text>
+                    <Text style={styles.agroLabel}>Horas Frío</Text>
+                </View>
+                <View style={styles.dividerVertical} />
+                <View style={styles.agroItem}>
+                    <MaterialCommunityIcons name="alert-octagon" size={24} color={agroStats.frost > 0 ? Colors.error : '#ccc'} />
+                    <Text style={[styles.agroValue, {color: agroStats.frost > 0 ? Colors.error : Colors.textPrimary}]}>
+                        {Math.round(agroStats.frost)} h
+                    </Text>
+                    <Text style={styles.agroLabel}>Heladas</Text>
+                </View>
+                <View style={styles.dividerVertical} />
+                <View style={styles.agroItem}>
+                    <MaterialCommunityIcons name="white-balance-sunny" size={24} color={Colors.warning} />
+                    <Text style={styles.agroValue}>{Math.round(agroStats.heat)} h</Text>
+                    <Text style={styles.agroLabel}>Calor Ext.</Text>
+                </View>
+            </View>
+        )}
+
         {/* Gráficos B01 */}
         {sensorDb?.type === "B01" && electrodesData && (
           <View style={styles.content}>
@@ -496,31 +600,6 @@ export default function CloudDataScreen() {
         {/* Gráficos C01 */}
         {sensorDb?.type === "C01" && climateData && (
           <View style={styles.content}>
-            
-            {/* PANEL DE INDICADORES (NUEVO) */}
-            <Text style={[styles.sectionTitle, {marginLeft: 16}]}>Indicadores Calculados</Text>
-            <View style={styles.agroPanel}>
-                <View style={styles.agroItem}>
-                    <MaterialCommunityIcons name="snowflake" size={24} color="#004aad" />
-                    <Text style={styles.agroValue}>{Math.round(agroStats.chill)} h</Text>
-                    <Text style={styles.agroLabel}>Horas Frío</Text>
-                </View>
-                <View style={styles.dividerVertical} />
-                <View style={styles.agroItem}>
-                    <MaterialCommunityIcons name="alert-octagon" size={24} color={agroStats.frost > 0 ? Colors.error : '#ccc'} />
-                    <Text style={[styles.agroValue, {color: agroStats.frost > 0 ? Colors.error : Colors.textPrimary}]}>
-                        {Math.round(agroStats.frost)} h
-                    </Text>
-                    <Text style={styles.agroLabel}>Heladas</Text>
-                </View>
-                <View style={styles.dividerVertical} />
-                <View style={styles.agroItem}>
-                    <MaterialCommunityIcons name="white-balance-sunny" size={24} color={Colors.warning} />
-                    <Text style={styles.agroValue}>{Math.round(agroStats.heat)} h</Text>
-                    <Text style={styles.agroLabel}>Calor Ext.</Text>
-                </View>
-            </View>
-
             <View style={styles.chartBox}>
               <Text style={styles.sectionTitle}>Temperatura (°C)</Text>
               <SensorChart data={climateData.temp.data} type="line" unit="°C" color={Colors.secondary} spacing={spacing} referenceLines={CLIMATE_LINES} />
@@ -584,7 +663,6 @@ const styles = StyleSheet.create({
   chartBox: { marginBottom: 25 },
   sectionTitle: { fontSize: 16, fontWeight: "bold", color: Colors.textPrimary, marginBottom: 8 },
   
-  // PANEL AGRO
   agroPanel: { flexDirection: 'row', backgroundColor: '#fff', borderRadius: 16, padding: 15, elevation: 2, marginBottom: 25, marginHorizontal: 16, borderWidth: 1, borderColor: '#eee', justifyContent: 'space-between' },
   agroItem: { flex: 1, alignItems: 'center' },
   agroValue: { fontSize: 18, fontWeight: 'bold', color: Colors.textPrimary, marginVertical: 4 },
