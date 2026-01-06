@@ -35,7 +35,7 @@ import { SensorEntity } from '../../../database/types';
 
 // Utils
 import { TimeRange, useSDDownloader } from '../../../hooks/useSDDownloader';
-import { calculateMedian, downsampleData, fillTimeGaps, formatForExcel } from '../../../utils/dataProcessing';
+import { calculateMedian, downsampleData, fillTimeGaps, formatChartData, formatForExcel } from '../../../utils/dataProcessing';
 
 // =====================================================================
 // COMPONENTE TARJETA EXPORTABLE
@@ -259,21 +259,6 @@ export default function SDDataClimateScreen() {
       return { intervalMs: finalInterval, spacing, labelFormat: labelFmt };
   };
 
-  const formatForChart = (arr: any[], format: string) => arr.map(p => {
-      if (p.hideDataPoint) {
-           return { value: p.value, label: "", hideDataPoint: true, dataPointRadius: 0, stripHeight: 0 };
-      }
-      const d = new Date(p.timestamp);
-      let label = "";
-      
-      if (format === 'hour') label = d.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
-      else if (format === 'day-hour') label = `${d.getDate()} ${d.getHours()}h`;
-      else if (format === 'day') label = `${d.getDate()}/${d.getMonth()+1}`;
-      else label = `${d.getDate()}/${d.getMonth()+1}`; 
-
-      return { value: p.value, label };
-  });
-
   const calculateStats = (arr: any[]) => {
     if (!arr.length) return { min: 0, max: 0, avg: 0 };
     const vals = arr.map(d => d.value);
@@ -323,7 +308,7 @@ export default function SDDataClimateScreen() {
         // Relleno
         const filled = fillTimeGaps(downsampled, intervalMs, startDate, endDate);
         // Formato
-        const data = formatForChart(filled, labelFormat);
+        const data = formatChartData(filled, labelFormat);
 
         return { data, stats };
     };

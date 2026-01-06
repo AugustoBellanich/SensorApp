@@ -37,7 +37,7 @@ import { ElectrodeEntity, LinearSegment, SensorEntity } from "../../../database/
 // Utils
 import { calculateMoistureFromSegments } from "../../../utils/calibration";
 // Importamos funciones optimizadas
-import { calculateMedian, downsampleData, fillTimeGaps, formatForExcel } from "../../../utils/dataProcessing";
+import { calculateMedian, downsampleData, fillTimeGaps, formatChartData, formatForExcel } from "../../../utils/dataProcessing";
 import { getAgronomicLines } from "../../../utils/referenceLines";
 
 type UnitType = "% Hv" | "% Hg" | "mV";
@@ -166,28 +166,6 @@ export default function LocalDataScreen() {
       return { intervalMs: finalInterval, labelFormat: labelFmt };
   };
 
-  // --- HELPERS VISUALES ---
-  const formatChart = useCallback((arr: any[], format: string) => {
-      if (!arr || arr.length === 0) return [];
-      
-      return arr.map((p) => {
-        if (p.hideDataPoint) return { value: p.value, label: "", hideDataPoint: true, dataPointRadius: 0, stripHeight: 0 };
-        
-        const val = Number(p.value);
-        if (isNaN(val)) return { value: 0, label: "" };
-        
-        const d = new Date(p.timestamp);
-        let label = "";
-        
-        // Etiquetado dinámico según formato
-        if (format === 'hour') label = d.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
-        else if (format === 'day-hour') label = `${d.getDate()} ${d.getHours()}h`;
-        else if (format === 'day') label = `${d.getDate()}/${d.getMonth()+1}`;
-        else label = `${d.getDate()}/${d.getMonth()+1}`; 
-
-        return { value: val, label };
-      });
-    }, []);
 
   const calcStats = useCallback((arr: any[]) => {
     if (!arr.length) return { min: 0, max: 0, avg: 0 };
@@ -236,11 +214,11 @@ export default function LocalDataScreen() {
           const downsampled = downsampleData(validData, key, intervalMs);
           stats = calcStats(downsampled);
           const filled = fillTimeGaps(downsampled, intervalMs, startDate, endDate);
-          finalData = formatChart(filled, labelFormat);
+          finalData = formatChartData(filled, labelFormat);
         } else {
           // Modo Real: Muestra todo (cuidado con muchos datos)
           const mapped = validData.map((p) => ({ timestamp: p.timestamp, value: p[key] }));
-          finalData = formatChart(mapped, 'hour'); // En real asumimos detalle hora
+          finalData = formatChartData(mapped, 'hour'); // En real asumimos detalle hora
           stats = calcStats(mapped);
         }
         return { data: finalData, stats };
@@ -248,7 +226,7 @@ export default function LocalDataScreen() {
 
       setElectrodesData({ 1: prep("v1"), 2: prep("v2"), 3: prep("v3") });
       setSoilTempData(prep("soil_temp"));
-    }, [unit, electrodesInfo, electrodeConfig, formatChart, calcStats, viewMode]);
+    }, [unit, electrodesInfo, electrodeConfig, formatChartData, calcStats, viewMode]);
 
   // --- PROCESAMIENTO C01 ---
   const processC01 = useCallback((data: any[]) => {
@@ -296,16 +274,16 @@ export default function LocalDataScreen() {
           const downsampled = downsampleData(validData, key, intervalMs);
           stats = calcStats(downsampled);
           const filled = fillTimeGaps(downsampled, intervalMs, startDate, endDate);
-          finalData = formatChart(filled, labelFormat);
+          finalData = formatChartData(filled, labelFormat);
         } else {
           const mapped = validData.map((p) => ({ timestamp: p.timestamp, value: p[key] }));
-          finalData = formatChart(mapped, 'hour');
+          finalData = formatChartData(mapped, 'hour');
           stats = calcStats(mapped);
         }
         return { data: finalData, stats };
       };
       setClimateData({ temp: prep("air_temp"), hum: prep("humidity") });
-    }, [formatChart, calcStats, viewMode]);
+    }, [formatChartData, calcStats, viewMode]);
 
   const processData = useCallback((data: any[], type: string) => {
       const safeType = type.toUpperCase();

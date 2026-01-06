@@ -53,24 +53,23 @@ export default function SensorChart({
   
   const validColor = color || Colors.primary;
 
-  // Helper para generar configuración de línea
-  // isBottomLine: true si es la línea de PMP (para asegurarnos que el texto vaya arriba)
+  // Helper para configuración de línea de referencia
   const getLineConfig = (ref: any, isBottomLine: boolean = false) => {
-      const colorWithOpacity = hexToRgba(ref.color, 0.7); // Opacidad 0.7 en línea y texto
+      const colorWithOpacity = hexToRgba(ref.color, 0.7);
       
       return {
           color: colorWithOpacity,
           thickness: 1,
-          dashWidth: 5,  // Hace la línea punteada
-          dashGap: 5,    // Espacio entre puntos
+          dashWidth: 5,
+          dashGap: 5,
           labelText: ref.label,
           labelTextStyle: { 
               color: colorWithOpacity, 
               fontSize: 12, 
               fontWeight: '900' as const,
-              marginLeft: 5,   // Padding left solicitado
-              marginTop: -15, // Esto empuja el texto HACIA ARRIBA de la línea
-              opacity: 0.7     // Refuerzo de opacidad en el texto
+              marginLeft: 5,
+              marginTop: -15, 
+              opacity: 0.7 
           },
           zIndex: 1000,
       };
@@ -88,31 +87,30 @@ export default function SensorChart({
     noOfSections: 5,
     yAxisTextStyle: { color: '#888', fontSize: 10 },
     
+    // --- ESTILO DEL EJE X (Aquí está la magia) ---
     xAxisLabelTextStyle: { 
-        color: '#888', 
-        fontSize: 9, 
+        color: '#666',       // Un gris un poco más oscuro para mejor lectura
+        fontSize: 10,        // Tamaño legible para fecha/hora
         textAlign: 'center' as const, 
-        width: 60 
+        width: 80,           // Ancho suficiente para que no se corte "DD/MM"
+        lineHeight: 14       // Espacio vertical entre la Hora y la Fecha
     },
-    xAxisTextNumberOfLines: 2,
+    xAxisTextNumberOfLines: 2, // ¡CRUCIAL! Permite el salto de línea
+    // ---------------------------------------------
+
     rulesColor: '#f0f0f0',
     rulesType: 'solid',
     yAxisLabelSuffix: '',
     
     // --- LÍNEAS DE REFERENCIA ---
-    
-    // Línea 1 (SAT - Arriba)
     showReferenceLine1: referenceLines.length > 0,
     referenceLine1Position: referenceLines[0]?.value || 0,
     referenceLine1Config: referenceLines[0] ? getLineConfig(referenceLines[0]) : undefined,
     
-    // Línea 2 (CC - Medio)
     showReferenceLine2: referenceLines.length > 1,
     referenceLine2Position: referenceLines[1]?.value || 0,
     referenceLine2Config: referenceLines[1] ? getLineConfig(referenceLines[1]) : undefined,
 
-    // Línea 3 (PMP - Abajo)
-    // Al usar getLineConfig con marginBottom: 5, aseguramos que el texto quede "sobre" la línea
     showReferenceLine3: referenceLines.length > 2,
     referenceLine3Position: referenceLines[2]?.value || 0,
     referenceLine3Config: referenceLines[2] ? getLineConfig(referenceLines[2], true) : undefined,

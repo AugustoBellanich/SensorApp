@@ -303,13 +303,13 @@ export default function HomeScreen() {
         label: "Gateway (N01)",
       },
       UNKNOWN: {
-        icon: "chip-outline",
+        icon: "developer-board",
         bg: "#f3f4f6",
         color: "#666",
         label: "Desconocido",
       },
     }[item.type] || {
-      icon: "chip-outline",
+      icon: "developer-board",
       bg: "#f3f4f6",
       color: "#666",
       label: "Desconocido",

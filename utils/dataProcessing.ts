@@ -197,3 +197,48 @@ export const formatForExcel = (ts: number | string | Date): string => {
     // Forzamos formato DD/MM/YYYY HH:mm (24 horas)
     return `${pad(d.getDate())}/${pad(d.getMonth()+1)}/${d.getFullYear()} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 };
+
+/**
+ * Formatea los datos para el gráfico (GiftedCharts).
+ * Maneja la lógica visual de etiquetas: Hora siempre, Fecha abajo solo al cambiar de día.
+ */
+export const formatChartData = (arr: any[], format: string) => {
+    if (!arr || arr.length === 0) return [];
+    
+    // Variable para recordar la fecha del punto anterior
+    let lastDateStr = ""; 
+
+    return arr.map((p) => {
+      // 1. Manejo de huecos (puntos invisibles)
+      if (p.hideDataPoint) {
+          return { value: p.value, label: "", hideDataPoint: true, dataPointRadius: 0, stripHeight: 0 };
+      }
+      
+      const val = Number(p.value);
+      if (isNaN(val)) return { value: 0, label: "" };
+      
+      const d = new Date(p.timestamp);
+      let label = "";
+      
+      // 2. Lógica de Etiquetado Inteligente
+      // Si estamos en modo 'hour' o 'day-hour' (zoom cercano/medio)
+      if (format === 'hour' || format === 'day-hour') {
+          const timeStr = d.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}); // "14:00"
+          const dateStr = `${d.getDate()}/${d.getMonth() + 1}`; // "6/1"
+
+          // Si la fecha cambia respecto al punto anterior, mostramos ambas
+          if (dateStr !== lastDateStr) {
+              label = `${timeStr}\n${dateStr}`; // \n fuerza el salto de línea
+              lastDateStr = dateStr; 
+          } else {
+              label = timeStr; // Solo hora
+          }
+      } 
+      // Si el zoom es lejano (días), solo mostramos la fecha
+      else {
+          label = `${d.getDate()}/${d.getMonth() + 1}`;
+      }
+
+      return { value: val, label };
+    });
+};
