@@ -26,10 +26,15 @@ let isSyncing = false;
 // Helper para verificar rol antes de subir
 const getUserRole = async (deviceId: string): Promise<'owner' | 'editor' | 'viewer' | null> => {
     try {
+        // Obtenemos el usuario actual para asegurar el filtro
+        const { data: { user } } = await supabase.auth.getUser();
+        if (!user) return null;
+
         const { data } = await supabase
             .from('sensor_permissions')
             .select('role')
             .eq('device_id', deviceId)
+            .eq('user_id', user.id)
             .single();
         return data?.role || null;
     } catch {
@@ -44,7 +49,7 @@ export const syncService = {
   },
 
   // ==============================================================================
-  // 1. PUSH (SUBIDA: Local -> Nube) - CON CHECK DE ROL
+  // 1. PUSH (SUBIDA: Local -> Nube)
   // ==============================================================================
   async pushChanges() {
     console.log("🔄 [SYNC] Iniciando subida de datos...");
@@ -54,7 +59,7 @@ export const syncService = {
         return;
     }
 
-    // A. SUBIR SENSORES (Solo Owners/Editores pueden cambiar config/alias en nube)
+    // A. SUBIR SENSORES
     try {
         const pendingSensors = await getSensorsPendingSync();
         if (pendingSensors.length > 0) {
@@ -62,10 +67,12 @@ export const syncService = {
             for (const sensor of pendingSensors) {
                 const cleanId = sensor.id.replace("SEN-", "").trim(); 
                 
-                // CHECK DE ROL
                 const role = await getUserRole(cleanId);
+                // Solo subimos cambios de config si somos dueños o editores
                 if (role !== 'owner' && role !== 'editor') {
-                    console.log(`🔒 [SYNC] Rol '${role}' en ${cleanId}. No se sube config.`);
+                    console.log(`🔒 [SYNC] Rol '${role}' en ${cleanId}. Solo se marca como sincronizado local.`);
+                    // Lo marcamos synced localmente para que no intente subirlo siempre
+                    await markSensorSynced(sensor.id); 
                     continue; 
                 }
 
@@ -92,7 +99,6 @@ export const syncService = {
         const pendingElectrodes = await db.getAllAsync<ElectrodeEntity>(
             "SELECT * FROM device_electrodes WHERE is_synced = 0"
         );
-        // Agrupamos por sensor para no consultar rol por cada electrodo
         const uniqueSensors = [...new Set(pendingElectrodes.map(e => e.sensor_id))];
 
         for (const rawSensorId of uniqueSensors) {
@@ -101,7 +107,6 @@ export const syncService = {
             
             if (role !== 'owner' && role !== 'editor') continue;
 
-            // Filtramos electrodos de este sensor
             const electrodesBatch = pendingElectrodes.filter(e => e.sensor_id === rawSensorId);
             
             const payload = electrodesBatch.map(elec => ({
@@ -123,27 +128,22 @@ export const syncService = {
         }
     } catch (e) { console.error("❌ [SYNC] Error electrodos:", e); }
 
-    // C. SUBIR LECTURAS B01 (SUELO)
+    // C. SUBIR LECTURAS B01
     try {
         const pendingReadings = await db.getAllAsync<ReadingB01>(
             "SELECT * FROM readings_b01 WHERE is_synced = 0 LIMIT 50"
         );
         
         if (pendingReadings.length > 0) {
-            // Agrupar por sensor
             const sensorsInBatch = [...new Set(pendingReadings.map(r => r.sensor_id))];
 
             for (const rawSensorId of sensorsInBatch) {
                 const cleanId = rawSensorId.replace("SEN-", "").trim();
                 
-                // 1. CHECK DE ROL: Si soy Viewer, NO subo.
+                // Check de seguridad: si no tengo permiso, no ensucio la base de datos
                 const role = await getUserRole(cleanId);
-                if (role !== 'owner' && role !== 'editor') {
-                    console.log(`🔒 [SYNC] Salteando B01 para ${cleanId} (Rol: ${role}).`);
-                    continue; 
-                }
+                if (!role) continue; 
 
-                // 2. Preparar Payload solo para este sensor
                 const batch = pendingReadings.filter(r => r.sensor_id === rawSensorId);
                 console.log(`📤 [SYNC] Subiendo ${batch.length} lecturas B01 para ${cleanId}...`);
 
@@ -173,7 +173,7 @@ export const syncService = {
         }
     } catch (e) { console.error("❌ [SYNC] Error lecturas B01:", e); }
 
-    // D. SUBIR LECTURAS C01 (CLIMA)
+    // D. SUBIR LECTURAS C01
     try {
         const pendingReadings = await db.getAllAsync<ReadingC01>(
             "SELECT * FROM readings_c01 WHERE is_synced = 0 LIMIT 50"
@@ -185,11 +185,7 @@ export const syncService = {
             for (const rawSensorId of sensorsInBatch) {
                 const cleanId = rawSensorId.replace("SEN-", "").trim();
                 const role = await getUserRole(cleanId);
-                
-                if (role !== 'owner' && role !== 'editor') {
-                    console.log(`🔒 [SYNC] Salteando C01 para ${cleanId} (Rol: ${role}).`);
-                    continue;
-                }
+                if (!role) continue;
 
                 const batch = pendingReadings.filter(r => r.sensor_id === rawSensorId);
                 const payload = batch.map(r => ({
@@ -220,22 +216,37 @@ export const syncService = {
   },
   
   // ==============================================================================
-  // 2. PULL (BAJADA: Nube -> Local)
+  // 2. PULL (BAJADA: Nube -> Local) - MEJORADO PARA ROLES
   // ==============================================================================
   async pullChanges() {
     if (!(await this.isOnline())) return;
     console.log("🔄 [SYNC] Iniciando PULL completo...");
 
     try {
-        const { data: remoteDevices, error: devErr } = await supabase.from("devices").select("*");
+        // A. Consultar PERMISOS, no solo dispositivos.
+        // Esto trae: Mi rol, el device_id, y los datos del dispositivo (Join)
+        const { data: myPermissions, error: permError } = await supabase
+            .from('sensor_permissions')
+            .select('role, device_id, devices (*)');
         
-        if (devErr) { console.error("❌ [SYNC] Error bajando devices:", devErr.message); return; }
-        if (!remoteDevices || remoteDevices.length === 0) return; 
+        if (permError) { console.error("❌ [SYNC] Error bajando permisos:", permError.message); return; }
+        if (!myPermissions || myPermissions.length === 0) return; 
 
         const now = new Date().toISOString();
 
-        for (const remote of remoteDevices) {
+        for (const item of myPermissions) {
+            // 'item.devices' es un objeto (singular) gracias al join de Supabase
+            const remote: any = item.devices; 
+            if (!remote) continue; // Si existe permiso pero no dispositivo (raro), saltar
+
             const localSensorId = remote.id.trim();
+            const myRole = item.role; // 'owner', 'editor', 'viewer'
+
+            // Preparamos la config local inyectando el rol
+            let configObj = {};
+            try { configObj = remote.config || {}; } catch {}
+            // Sobreescribimos/Agregamos el rol para uso local
+            const localConfig = { ...configObj, role: myRole };
 
             const localSensor: SensorEntity = {
                 id: localSensorId,
@@ -245,12 +256,15 @@ export const syncService = {
                 activity: remote.activity,
                 lat: remote.lat,
                 lng: remote.lng,
-                config_json: JSON.stringify(remote.config),
+                config_json: JSON.stringify(localConfig), // Guardamos rol aquí
                 is_synced: 1, 
                 updated_at: remote.created_at || now,
             };
+
+            // Guardamos en SQLite (Insert or Update)
             await saveSensor(localSensor, true);
 
+            // B. Descargar Electrodos
             const { data: remoteElecs } = await supabase
                 .from("device_electrodes")
                 .select("*")
@@ -274,7 +288,8 @@ export const syncService = {
                 }
             }
             
-            // 3. BAJAR ÚLTIMA LECTURA
+            // C. Descargar ÚLTIMA LECTURA (Para tener algo que mostrar si es nuevo)
+            // (La lógica es idéntica a la anterior, solo cambia la query inicial)
             if (remote.type === 'B01') {
                 const { data: readings } = await supabase
                     .from('readings_b01')

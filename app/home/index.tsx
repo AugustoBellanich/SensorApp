@@ -221,32 +221,47 @@ export default function HomeScreen() {
     setDisplayList(combined);
   }, [scannedDevices, savedSensors]);
 
-  // --- 4. ACCIÓN: CONECTAR O ENTRAR A DASHBOARD ---
+  // --- 4. ACCIÓN: CONECTAR O ENTRAR A DASHBOARD (CON VALIDACIÓN DE FORMATO) ---
   const handleConnectAction = async (item: SensorItem) => {
     if (isBusy || isSyncing) return;
 
     if (item.device) {
       try {
+        // 1. LIMPIEZA Y NORMALIZACIÓN DEL ID
+        const rawId = item.device.name || item.id;
+        // Quitamos "SEN-" si existe y convertimos a mayúsculas para estandarizar
+        const cleanId = rawId.replace(/^SEN-/i, "").trim().toUpperCase();
+
+        // 2. VALIDACIÓN DE FORMATO (NUEVO)
+        // Regex: Letra + 2 Números + Guion + 6 Alfanuméricos (Ej: B01-A1B2C3)
+        const idRegex = /^[A-Z]\d{2}-[A-Z0-9]{6}$/;
+
+        if (!idRegex.test(cleanId)) {
+            Alert.alert(
+                "Formato Inválido",
+                `El sensor "${cleanId}" no cumple con el formato estándar (Ej: B01-XXXXXX).\n\nNo se puede vincular.`
+            );
+            return; // ⛔ DETENEMOS TODO AQUÍ
+        }
+
         setOnboardingStatus("Conectando...");
         await connectToDevice(item.device);
 
-        const rawId = item.device.name || item.id;
-        const cleanId = rawId.replace("SEN-", "").trim();
-
-        // --- AQUÍ CORREGIMOS EL ERROR DE DUPLICADO ---
         // Verificamos una sola vez si existe localmente
         const existingLocal = await getSensorById(cleanId);
 
         if (!existingLocal) {
           setOnboardingStatus("Vinculando...");
 
-          const validatedType: "B01" | "C01" | "N01" =
-            item.type === "UNKNOWN" ? "B01" : item.type;
-
+          // Detectamos tipo basado en la primera letra/números (B01, C01, N01)
+          let validatedType: "B01" | "C01" | "N01" = "B01"; // Default
+          if (cleanId.startsWith("C01")) validatedType = "C01";
+          else if (cleanId.startsWith("N01")) validatedType = "N01";
+          
           // USAMOS LA NUEVA FUNCIÓN DEL REPO
           const result = await linkNewSensor({
             id: cleanId,
-            alias: item.name,
+            alias: item.name, // Usamos el nombre original o cleanId como alias inicial
             type: validatedType,
             location: "Sin asignar",
             activity: "Nuevo",
@@ -257,7 +272,6 @@ export default function HomeScreen() {
 
           console.log(`[Home] Resultado vinculación: ${result.status}`);
 
-          // Feedback al usuario según el resultado
           if (result.status === "LOCAL_ONLY") {
             Alert.alert("Modo Local", result.message);
           } else if (result.status === "EDITOR_CONFIRMED") {
@@ -278,10 +292,12 @@ export default function HomeScreen() {
         Alert.alert("Error", "No se pudo conectar.");
       }
     } else if (item.isSaved) {
+      // Si ya está guardado, entramos directo (se asume que ya fue validado al crearse)
       const route = item.type === "N01" ? "gateway" : "sensor";
       router.push(`/${route}/${item.id}/dashboard`);
     }
   };
+
   const renderItem = ({ item }: { item: SensorItem }) => {
     const meta = {
       B01: {
