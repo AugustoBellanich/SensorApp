@@ -1,12 +1,10 @@
 export default ({ config }) => {
-  // Detecta si estás usando el perfil de preview (APK)
   const isTest = process.env.APP_VARIANT === 'test';
 
   return {
     ...config,
-    // Nombre que verás en el icono del celular
     name: isTest ? "SENSOR APP (TEST)" : "SENSOR APP",
-    slug: "SensorApp", // Coincide con tu ID de proyecto en EAS
+    slug: "SensorApp",
     version: "1.0.0",
     orientation: "portrait",
     icon: "./assets/images/icon.png",
@@ -14,6 +12,7 @@ export default ({ config }) => {
     userInterfaceStyle: "light",
     newArchEnabled: true,
 
+    // Configuración Global (iOS y Default)
     splash: {
       image: "./assets/images/splash.png",
       resizeMode: "contain",
@@ -25,11 +24,19 @@ export default ({ config }) => {
         foregroundImage: "./assets/images/icon.png",
         backgroundColor: "#ffffff"
       },
-      // ID del paquete dinámico para permitir instalar ambas apps
       package: isTest ? "com.bellanich.agrosense.test" : "com.inta.sensorapp",
       edgeToEdgeEnabled: true,
       predictiveBackGestureEnabled: false,
-      // Permisos explícitos (opcional, pero buena práctica con BLE)
+      
+      // --- CORRECCIÓN AQUÍ: Forzar Splash en Android ---
+      splash: {
+        image: "./assets/images/splash.png",
+        resizeMode: "contain", // Asegura que entre toda la imagen
+        backgroundColor: "#ffffff",
+        // dark: { ... } // Opcional si tienes modo oscuro
+      },
+      // -----------------------------------------------
+
       permissions: [
         "android.permission.BLUETOOTH",
         "android.permission.BLUETOOTH_ADMIN",
@@ -42,31 +49,25 @@ export default ({ config }) => {
     plugins: [
       "expo-router",
       "expo-sqlite",
+      // Plugin Splash Screen: Quitamos 'imageWidth' fijo para dejar que 'contain' haga su trabajo
       [
         "expo-splash-screen",
         {
+          "backgroundColor": "#ffffff",
           "image": "./assets/images/splash.png",
           "resizeMode": "contain",
-          "imageWidth": 180,
-          //"resizeMode": "native",
-          "backgroundColor": "#ffffff",
-          "dark": {
-             "backgroundColor": "#ffffff"
-          }
+          "imageWidth": 200 // Un valor seguro si el automático falla
         }
       ],
-      // --- SOLUCIÓN AL CRASH (Desactiva Minificación/ProGuard) ---
       [
         "expo-build-properties",
         {
           "android": {
             "enableProguardInReleaseBuilds": false,
-            // Reglas extra por si acaso, aunque con false arriba ya debería bastar
             "extraProguardRules": "-keep class com.polidea.reactnativeble.** { *; } -keep class com.rxandroidble2.** { *; }"
           }
         }
       ],
-      // --- CONFIGURACIÓN BLE NATIVA (Vital para APK) ---
       [
         "@config-plugins/react-native-ble-plx",
         {

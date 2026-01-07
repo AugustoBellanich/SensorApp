@@ -65,9 +65,7 @@ export default function CloudDataScreen() {
   const [sensorDb, setSensorDb] = useState<SensorEntity | null>(null);
 
   // Filtros Fecha (Default 7 días)
-  const [dateStart, setDateStart] = useState(
-    new Date(new Date().setDate(new Date().getDate() - 7))
-  );
+  const [dateStart, setDateStart] = useState(new Date());
   const [dateEnd, setDateEnd] = useState(new Date());
   const [showPicker, setShowPicker] = useState<"start" | "end" | null>(null);
 
