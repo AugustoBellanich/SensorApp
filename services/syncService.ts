@@ -9,6 +9,7 @@ import {
 } from "../database/ElectrodeRepository";
 import { insertReadingsB01, insertReadingsC01 } from "../database/ReadingsRepository";
 import {
+    getSensorById,
     getSensorsPendingSync,
     markSensorSynced,
     saveSensor,
@@ -23,19 +24,32 @@ const LAST_PULL_KEY = "LAST_SYNC_TIMESTAMP";
 // SEMÁFORO
 let isSyncing = false;
 
-// Helper para verificar rol antes de subir
+// ==============================================================================
+// HELPER: ROL LOCAL FIRST
+// ==============================================================================
 const getUserRole = async (deviceId: string): Promise<'owner' | 'editor' | 'viewer' | null> => {
     try {
-        // Obtenemos el usuario actual para asegurar el filtro
+        const cleanId = deviceId.replace("SEN-", "").trim();
+        // 1. Intento Local (Prioridad para permitir subidas offline-first)
+        const localSensor = await getSensorById(cleanId);
+        if (localSensor && localSensor.config_json) {
+            try {
+                const config = JSON.parse(localSensor.config_json);
+                if (config.role) return config.role;
+            } catch {}
+        }
+
+        // 2. Intento Nube (Fallback)
         const { data: { user } } = await supabase.auth.getUser();
         if (!user) return null;
 
         const { data } = await supabase
             .from('sensor_permissions')
             .select('role')
-            .eq('device_id', deviceId)
+            .eq('device_id', cleanId)
             .eq('user_id', user.id)
             .single();
+        
         return data?.role || null;
     } catch {
         return null;
@@ -54,12 +68,15 @@ export const syncService = {
   async pushChanges() {
     console.log("🔄 [SYNC] Iniciando subida de datos...");
     
-    if (!(await this.isOnline())) {
-        console.log("⚠️ [SYNC] Sin conexión. Se intentará más tarde.");
+    const online = await this.isOnline();
+    console.log(`🌐 Estado de red: ${online ? 'ONLINE' : 'OFFLINE'}`);
+
+    if (!online) {
+        console.log("⚠️ [SYNC] Abortando por falta de conexión.");
         return;
     }
 
-    // A. SUBIR SENSORES
+    // A. SUBIR SENSORES (METADATA)
     try {
         const pendingSensors = await getSensorsPendingSync();
         if (pendingSensors.length > 0) {
@@ -68,28 +85,46 @@ export const syncService = {
                 const cleanId = sensor.id.replace("SEN-", "").trim(); 
                 
                 const role = await getUserRole(cleanId);
+                
                 // Solo subimos cambios de config si somos dueños o editores
                 if (role !== 'owner' && role !== 'editor') {
-                    console.log(`🔒 [SYNC] Rol '${role}' en ${cleanId}. Solo se marca como sincronizado local.`);
-                    // Lo marcamos synced localmente para que no intente subirlo siempre
+                    console.log(`🔒 [SYNC] Rol '${role}' en ${cleanId}. Solo marco synced local.`);
                     await markSensorSynced(sensor.id); 
                     continue; 
                 }
 
+                console.log(`🚀 [SYNC] Subiendo ${cleanId}...`);
+
+                // 1. Inferencia de Tipo (Evita error 400 Not Null)
+                let finalType = sensor.type;
+                if (!finalType) {
+                    if (cleanId.startsWith("B01")) finalType = "B01";
+                    else if (cleanId.startsWith("C01")) finalType = "C01";
+                    else if (cleanId.startsWith("N01")) finalType = "N01";
+                    else finalType = "UNKNOWN" as any;
+                }
+
+                // 2. Conversión Numérica Segura
+                const latNum = parseFloat(sensor.lat as any) || 0;
+                const lngNum = parseFloat(sensor.lng as any) || 0;
+
                 const { error } = await supabase.from("devices").upsert({
                     id: cleanId,
                     alias: sensor.alias,
-                    type: sensor.type,
+                    type: finalType,
                     name_farm: sensor.location,
                     activity: sensor.activity,
-                    lat: sensor.lat,
-                    lng: sensor.lng,
+                    lat: latNum,
+                    lng: lngNum,
                     config: JSON.parse(sensor.config_json || "{}"),
                     last_sync: new Date().toISOString(),
                 });
 
                 if (error) console.error(`❌ [SYNC] Error sensor ${cleanId}:`, error.message);
-                else await markSensorSynced(sensor.id);
+                else {
+                    console.log(`✅ [SYNC] ${cleanId} subido OK.`);
+                    await markSensorSynced(sensor.id);
+                }
             }
         }
     } catch (e) { console.error("❌ [SYNC] Error sensores:", e); }
@@ -99,31 +134,36 @@ export const syncService = {
         const pendingElectrodes = await db.getAllAsync<ElectrodeEntity>(
             "SELECT * FROM device_electrodes WHERE is_synced = 0"
         );
-        const uniqueSensors = [...new Set(pendingElectrodes.map(e => e.sensor_id))];
+        if (pendingElectrodes.length > 0) {
+            const uniqueSensors = [...new Set(pendingElectrodes.map(e => e.sensor_id))];
 
-        for (const rawSensorId of uniqueSensors) {
-            const cleanId = rawSensorId.replace("SEN-", "").trim();
-            const role = await getUserRole(cleanId);
-            
-            if (role !== 'owner' && role !== 'editor') continue;
+            for (const rawSensorId of uniqueSensors) {
+                const cleanId = rawSensorId.replace("SEN-", "").trim();
+                const role = await getUserRole(cleanId);
+                
+                if (role !== 'owner' && role !== 'editor') continue;
 
-            const electrodesBatch = pendingElectrodes.filter(e => e.sensor_id === rawSensorId);
-            
-            const payload = electrodesBatch.map(elec => ({
-                id: elec.id,
-                device_id: cleanId,
-                electrode_index: elec.electrode_index,
-                depth: elec.depth,
-                texture: elec.texture,
-                density: elec.density,
-                points_json: JSON.parse(elec.points_json || "[]"), 
-                equations_json: JSON.parse(elec.equations_json || "[]"),
-                updated_at: new Date().toISOString()
-            }));
+                const electrodesBatch = pendingElectrodes.filter(e => e.sensor_id === rawSensorId);
+                
+                // Mapeo sensor_id -> device_id
+                const payload = electrodesBatch.map(elec => ({
+                    id: elec.id,
+                    device_id: cleanId, // <--- MAPEO CORRECTO
+                    electrode_index: elec.electrode_index,
+                    depth: elec.depth,
+                    texture: elec.texture,
+                    density: elec.density,
+                    points_json: JSON.parse(elec.points_json || "[]"), 
+                    equations_json: JSON.parse(elec.equations_json || "[]"),
+                    updated_at: new Date().toISOString()
+                }));
 
-            const { error } = await supabase.from("device_electrodes").upsert(payload);
-            if (!error) {
-                for (const elec of electrodesBatch) await markElectrodeSynced(elec.id);
+                const { error } = await supabase.from("device_electrodes").upsert(payload);
+                if (!error) {
+                    for (const elec of electrodesBatch) await markElectrodeSynced(elec.id);
+                } else {
+                    console.error("❌ [SYNC] Error subiendo electrodos:", error.message);
+                }
             }
         }
     } catch (e) { console.error("❌ [SYNC] Error electrodos:", e); }
@@ -139,16 +179,13 @@ export const syncService = {
 
             for (const rawSensorId of sensorsInBatch) {
                 const cleanId = rawSensorId.replace("SEN-", "").trim();
-                
-                // Check de seguridad: si no tengo permiso, no ensucio la base de datos
                 const role = await getUserRole(cleanId);
-                if (!role) continue; 
+                if (!role || role === 'viewer') continue; 
 
                 const batch = pendingReadings.filter(r => r.sensor_id === rawSensorId);
-                console.log(`📤 [SYNC] Subiendo ${batch.length} lecturas B01 para ${cleanId}...`);
-
+                
                 const payload = batch.map(r => ({
-                    device_id: cleanId,
+                    device_id: cleanId, // <--- MAPEO CORRECTO
                     sensor_id: cleanId,
                     sensor_type: 'B01',
                     timestamp: r.timestamp, 
@@ -165,7 +202,6 @@ export const syncService = {
                 if (!error) {
                     const ids = batch.map(r => r.id).join(',');
                     await db.runAsync(`UPDATE readings_b01 SET is_synced = 1 WHERE id IN (${ids})`);
-                    console.log("✅ [SYNC] B01 subido.");
                 } else {
                     console.error("❌ [SYNC] Error B01:", error.message);
                 }
@@ -185,11 +221,11 @@ export const syncService = {
             for (const rawSensorId of sensorsInBatch) {
                 const cleanId = rawSensorId.replace("SEN-", "").trim();
                 const role = await getUserRole(cleanId);
-                if (!role) continue;
+                if (!role || role === 'viewer') continue;
 
                 const batch = pendingReadings.filter(r => r.sensor_id === rawSensorId);
                 const payload = batch.map(r => ({
-                    device_id: cleanId,
+                    device_id: cleanId, // <--- MAPEO CORRECTO
                     sensor_id: cleanId,
                     sensor_type: 'C01',
                     timestamp: r.timestamp,
@@ -206,7 +242,6 @@ export const syncService = {
                 if (!error) {
                     const ids = batch.map(r => r.id).join(',');
                     await db.runAsync(`UPDATE readings_c01 SET is_synced = 1 WHERE id IN (${ids})`);
-                    console.log("✅ [SYNC] C01 subido.");
                 } else {
                     console.error("❌ [SYNC] Error C01:", error.message);
                 }
@@ -216,15 +251,13 @@ export const syncService = {
   },
   
   // ==============================================================================
-  // 2. PULL (BAJADA: Nube -> Local) - MEJORADO PARA ROLES
+  // 2. PULL (BAJADA: Nube -> Local) - PROTEGIDO CONTRA SOBRESCRITURA
   // ==============================================================================
   async pullChanges() {
     if (!(await this.isOnline())) return;
     console.log("🔄 [SYNC] Iniciando PULL completo...");
 
     try {
-        // A. Consultar PERMISOS, no solo dispositivos.
-        // Esto trae: Mi rol, el device_id, y los datos del dispositivo (Join)
         const { data: myPermissions, error: permError } = await supabase
             .from('sensor_permissions')
             .select('role, device_id, devices (*)');
@@ -235,36 +268,42 @@ export const syncService = {
         const now = new Date().toISOString();
 
         for (const item of myPermissions) {
-            // 'item.devices' es un objeto (singular) gracias al join de Supabase
             const remote: any = item.devices; 
-            if (!remote) continue; // Si existe permiso pero no dispositivo (raro), saltar
+            if (!remote) continue;
 
             const localSensorId = remote.id.trim();
-            const myRole = item.role; // 'owner', 'editor', 'viewer'
+            
+            // 🛡️ PROTECCIÓN DE SOBRESCRITURA
+            // Antes de bajar datos, vemos si hay cambios locales pendientes.
+            const existingLocal = await getSensorById(localSensorId);
+            
+            // Si existe localmente Y tiene cambios pendientes (is_synced = 0)
+            // IGNORAMOS la actualización de metadata de la nube.
+            if (existingLocal && existingLocal.is_synced === 0) {
+                 console.log(`🛡️ [SYNC] Saltando bajada de metadata para ${localSensorId}: Hay cambios locales pendientes.`);
+            } else {
+                // Si está sincronizado, bajamos lo nuevo de la nube
+                const myRole = item.role;
+                let configObj = {};
+                try { configObj = remote.config || {}; } catch {}
+                const localConfig = { ...configObj, role: myRole };
 
-            // Preparamos la config local inyectando el rol
-            let configObj = {};
-            try { configObj = remote.config || {}; } catch {}
-            // Sobreescribimos/Agregamos el rol para uso local
-            const localConfig = { ...configObj, role: myRole };
+                const localSensor: SensorEntity = {
+                    id: localSensorId,
+                    alias: remote.alias,
+                    type: remote.type as any,
+                    location: remote.name_farm,
+                    activity: remote.activity,
+                    lat: remote.lat,
+                    lng: remote.lng,
+                    config_json: JSON.stringify(localConfig),
+                    is_synced: 1, // Viene de la nube, está synced
+                    updated_at: remote.created_at || now,
+                };
+                await saveSensor(localSensor, true);
+            }
 
-            const localSensor: SensorEntity = {
-                id: localSensorId,
-                alias: remote.alias,
-                type: remote.type as any,
-                location: remote.name_farm,
-                activity: remote.activity,
-                lat: remote.lat,
-                lng: remote.lng,
-                config_json: JSON.stringify(localConfig), // Guardamos rol aquí
-                is_synced: 1, 
-                updated_at: remote.created_at || now,
-            };
-
-            // Guardamos en SQLite (Insert or Update)
-            await saveSensor(localSensor, true);
-
-            // B. Descargar Electrodos
+            // B. Descargar Electrodos (Mapeo Inverso)
             const { data: remoteElecs } = await supabase
                 .from("device_electrodes")
                 .select("*")
@@ -274,7 +313,7 @@ export const syncService = {
                 for (const re of remoteElecs) {
                     const localElec: ElectrodeEntity = {
                         id: re.id,
-                        sensor_id: localSensorId,
+                        sensor_id: re.device_id, // <--- MAPEO: device_id (nube) -> sensor_id (local)
                         electrode_index: re.electrode_index,
                         depth: re.depth,
                         texture: re.texture,
@@ -288,8 +327,7 @@ export const syncService = {
                 }
             }
             
-            // C. Descargar ÚLTIMA LECTURA (Para tener algo que mostrar si es nuevo)
-            // (La lógica es idéntica a la anterior, solo cambia la query inicial)
+            // C. Descargar ÚLTIMA LECTURA
             if (remote.type === 'B01') {
                 const { data: readings } = await supabase
                     .from('readings_b01')
@@ -301,7 +339,7 @@ export const syncService = {
                 if (readings && readings.length > 0) {
                     const mappedReadings = readings.map(r => ({
                         ...r,
-                        sensor_id: localSensorId, 
+                        sensor_id: r.device_id, // <--- MAPEO
                         is_synced: 1
                     }));
                     await insertReadingsB01(mappedReadings as ReadingB01[]);
@@ -317,7 +355,7 @@ export const syncService = {
                 if (readings && readings.length > 0) {
                     const mappedReadings = readings.map(r => ({
                         ...r,
-                        sensor_id: localSensorId,
+                        sensor_id: r.device_id, // <--- MAPEO
                         is_synced: 1
                     }));
                     await insertReadingsC01(mappedReadings as ReadingC01[]);
@@ -337,8 +375,11 @@ export const syncService = {
     if (isSyncing) return;
     try {
         isSyncing = true;
+        
+        // ORDEN CRÍTICO: Primero subimos (Push), luego bajamos (Pull)
         await this.pushChanges();
         await this.pullChanges();
+        
         console.log("✨ [SYNC] Sincronización Global Finalizada");
     } catch (e) {
         console.error("❌ [SYNC] Error crítico en syncAll:", e);

@@ -1,8 +1,8 @@
 import * as SQLite from "expo-sqlite";
 
 // Abrir la base de datos de forma síncrona
-// AL CAMBIAR EL NOMBRE A V6, FORZAMOS UNA DB NUEVA Y LIMPIA CON LA NUEVA ESTRUCTURA
-export const db = SQLite.openDatabaseSync("agrosense_V6.db");
+// AL CAMBIAR EL NOMBRE A V8, FORZAMOS UNA DB NUEVA Y LIMPIA CON LA NUEVA ESTRUCTURA
+export const db = SQLite.openDatabaseSync("agrosense_V8.db");
 
 export const initDatabase = async () => {
   try {
@@ -110,7 +110,7 @@ export const initDatabase = async () => {
       );
     `);
 
-    console.log("[DB] Inicialización completada. Sistema listo (V6).");
+    console.log("[DB] Inicialización completada. Sistema listo (V8).");
   } catch (error) {
     console.error("[DB] ❌ Error fatal iniciando BD:", error);
   }

@@ -20,7 +20,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { BLE_UUIDS } from "../../../constants/BleUUIDs";
 import { Colors } from "../../../constants/Colors";
 import { useBle } from "../../../context/BleContext";
-import { getSensorById, saveSensor } from "../../../database/SensorRepository";
+import { getSensorById, updateSensorLocal } from "../../../database/SensorRepository";
 import {
     INGEST_TOKEN,
     SUPABASE_ANON_KEY,
@@ -61,7 +61,7 @@ export default function GatewayConfigScreen() {
                     try {
                         const c = await connectedDevice.readCharacteristicForService(BLE_UUIDS.SVC_CONFIG, uuid);
                         return c.value ? Buffer.from(c.value, 'base64').toString('utf8') : "";
-                    } catch (e) { return ""; }
+                    } catch { return ""; }
                 };
 
                 // Leemos en paralelo (o secuencial rápido)
@@ -190,11 +190,11 @@ export default function GatewayConfigScreen() {
                 const conf = currentSensor.config_json ? JSON.parse(currentSensor.config_json) : {};
                 conf.uploadInterval = parseInt(uploadInterval);
                 conf.localSaveInterval = parseInt(localSaveInterval);
-                await saveSensor({ ...currentSensor, config_json: JSON.stringify(conf) });
+                await updateSensorLocal({ ...currentSensor, config_json: JSON.stringify(conf) });
             }
 
             Alert.alert("Tiempos Actualizados", "Nuevos intervalos configurados.");
-        } catch (e) {
+        } catch {
             Alert.alert("Error", "Fallo al actualizar tiempos.");
         } finally {
             setIsWriting(false);

@@ -22,26 +22,25 @@ import { Colors } from "../../../constants/Colors";
 import { useBle } from "../../../context/BleContext";
 import { getSensorById, unlinkSensor } from "../../../database/SensorRepository";
 import { SensorEntity } from "../../../database/types";
-// Asegúrate de que la ruta sea correcta según donde creaste el archivo
 import {
   getBatteryColor,
   getBatteryIcon,
   getBatteryPercentage,
 } from "../../../utils/batteryUtils";
 
+// --- SUPABASE ---
+import { supabase } from "../../../lib/supabase";
+
 // --- HELPER: FORMATO FECHA ARGENTINA ---
 const formatDateAR = (isoStringOrTimestamp: string | number) => {
   if (!isoStringOrTimestamp) return "--/-- --:--";
-
   let date: Date;
   if (typeof isoStringOrTimestamp === "number") {
     date = new Date(isoStringOrTimestamp * 1000);
   } else {
     date = new Date(isoStringOrTimestamp);
   }
-
   if (isNaN(date.getTime())) return "--/-- --:--";
-
   return date
     .toLocaleString("es-AR", {
       day: "2-digit",
@@ -68,7 +67,13 @@ export default function GatewayDashboard() {
   const isConnected = !!connectedDevice;
   const [dbSensor, setDbSensor] = useState<SensorEntity | null>(null);
 
-  // Cargar datos de DB
+  // ROL DEL USUARIO
+  const [userRole, setUserRole] = useState<string>("viewer"); 
+  const canEdit = userRole === 'owner' || userRole === 'editor';
+
+  const [isDeleting, setIsDeleting] = useState(false);
+
+  // 1. Cargar datos de DB Local
   useEffect(() => {
     const load = async () => {
       if (sensorIdStr) {
@@ -79,13 +84,38 @@ export default function GatewayDashboard() {
     load();
   }, [sensorIdStr]);
 
+  // 2. Verificar Rol (Local + Nube)
   useEffect(() => {
-    // Al montar no hacemos nada
+     const checkRole = async () => {
+        if(!dbSensor) return;
 
+        // A. Intentar leer del JSON local primero
+        try {
+            const config = JSON.parse(dbSensor.config_json || '{}');
+            if(config.role) setUserRole(config.role);
+        } catch {}
+
+        // B. Verificar en Supabase si hay internet
+        const { data: { user } } = await supabase.auth.getUser();
+        if (user) {
+            const { data } = await supabase
+                .from('sensor_permissions')
+                .select('role')
+                .eq('device_id', sensorIdStr)
+                .eq('user_id', user.id)
+                .single();
+            
+            if (data?.role) {
+                setUserRole(data.role);
+            }
+        }
+     };
+     checkRole();
+  }, [dbSensor, sensorIdStr]);
+
+  // 3. Desconexión al salir
+  useEffect(() => {
     return () => {
-      // Esto SOLO se ejecuta cuando el componente se destruye (Unmount)
-      // En Expo Router, al ir hacia atrás (Back), el componente se desmonta.
-      // Al ir "hacia adelante" (a Config), el componente NO se desmonta.
       console.log("[Dashboard] Componente destruido. Desconectando...");
       disconnectDevice();
     };
@@ -94,12 +124,7 @@ export default function GatewayDashboard() {
   // Estados específicos del Gateway
   const wifiStatus = diagnosisStatus.wifiStatus || "UNKNOWN";
   const isWifiOnline = wifiStatus === "ONLINE";
-  // Nota: Aquí podrías usar también getBatteryPercentage si quisieras,
-  // pero por ahora dejamos el crudo o 0 para la batería del Gateway principal.
   const batteryPercent = isConnected ? sensorData.battery ?? 0 : 0;
-
-
-  const [isDeleting, setIsDeleting] = useState(false);
 
   // --- PARSEO DE LISTA DE SENSORES (LORA) ---
   const loraSensors = useMemo(() => {
@@ -110,7 +135,6 @@ export default function GatewayDashboard() {
         .map((key) => ({
           id: key,
           ...raw[key],
-          // raw[key] trae: { type, last, bat, v1, v2, v3 }
         }))
         .sort((a: any, b: any) => b.last - a.last);
     } catch {
@@ -128,33 +152,34 @@ export default function GatewayDashboard() {
         BLE_UUIDS.CONFIG.SEND_NOW,
         base64Val
       );
-      Alert.alert(
-        "Comando Enviado",
-        "El Gateway intentará subir los datos pendientes ahora."
-      );
+      Alert.alert("Comando Enviado", "El Gateway intentará subir los datos pendientes ahora.");
     } catch {
       Alert.alert("Error", "No se pudo enviar el comando.");
     }
   };
 
+  // Acción: Eliminar / Desvincular
   const handleUnlink = () => {
+    const isOwner = userRole === 'owner';
+    const message = isOwner
+      ? "Eres el PROPIETARIO. Si confirmas, perderás el control sobre este Gateway y quedará LIBRE para que otro usuario lo registre.\n\nSe borrarán todos los datos locales."
+      : "Se eliminará el Gateway de tu lista local. El propietario seguirá teniendo acceso.";
+
     Alert.alert(
-      "Desvincular Gateway",
-      "¿Estás seguro? Se eliminará el dispositivo de la App y sus datos locales.\n\n(Si hay internet, también se desvinculará de la nube).",
+      isOwner ? "Liberar Gateway" : "Desvincular",
+      message,
       [
         { text: "Cancelar", style: "cancel" },
         {
-          text: "Eliminar",
+          text: isOwner ? "Liberar y Borrar" : "Borrar",
           style: "destructive",
           onPress: async () => {
             setIsDeleting(true);
             try {
-              if (connectedDevice) await disconnectDevice(); // Desconectar primero
-              
-              const result = await unlinkSensor(sensorIdStr); // Borrar DB
-              
+              if (connectedDevice) await disconnectDevice();
+              const result = await unlinkSensor(sensorIdStr);
               if (result.success) {
-                router.replace("/"); // Volver al inicio
+                router.replace("/");
               } else {
                 Alert.alert("Error", "No se pudo eliminar: " + result.error);
               }
@@ -179,49 +204,53 @@ export default function GatewayDashboard() {
         <View style={styles.headerRow}>
           <View>
             <Text style={styles.headerTitle}>Gateway N01</Text>
-            <View
-              style={{ flexDirection: "row", alignItems: "center", gap: 5 }}
-            >
-              <View
-                style={[
-                  styles.dot,
-                  {
-                    backgroundColor: isConnected
-                      ? Colors.success
-                      : Colors.error,
-                  },
-                ]}
-              />
-              <Text style={styles.headerSub}>
-                {isConnected ? "Conectado por BLE" : "Desconectado"}
-              </Text>
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 5 }}>
+              <View style={[styles.dot, { backgroundColor: isConnected ? Colors.success : Colors.error }]} />
+              <Text style={styles.headerSub}>{isConnected ? "Conectado por BLE" : "Desconectado"}</Text>
             </View>
           </View>
           <View style={styles.batteryBadge}>
-            <MaterialCommunityIcons
-              name="battery"
-              size={20}
-              color={isConnected ? Colors.success : "#ccc"}
-            />
-            <Text style={{ fontWeight: "bold", color: "#555" }}>
-              {isConnected ? `${batteryPercent}%` : "--"}
-            </Text>
+            <MaterialCommunityIcons name="battery" size={20} color={isConnected ? Colors.success : "#ccc"} />
+            <Text style={{ fontWeight: "bold", color: "#555" }}>{isConnected ? `${batteryPercent}%` : "--"}</Text>
           </View>
         </View>
       </View>
+
+      {/* BADGE DE ROL */}
+       <View style={{ 
+          backgroundColor: userRole === 'owner' ? '#e8f5e9' : '#fff3e0', 
+          paddingVertical: 4, paddingHorizontal: 16,
+          flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: 6
+       }}>
+          <MaterialCommunityIcons 
+             name={userRole === 'owner' ? "shield-check" : "eye-outline"} 
+             size={14} 
+             color={userRole === 'owner' ? "#2e7d32" : "#ef6c00"} 
+          />
+          <Text style={{ 
+             fontSize: 12, fontWeight: 'bold', 
+             color: userRole === 'owner' ? "#2e7d32" : "#ef6c00",
+             textTransform: 'uppercase'
+          }}>
+             {userRole === 'owner' ? "Administrador (Dueño)" : "Modo Visualizador"}
+          </Text>
+       </View>
 
       <SensorInfoBar
         id={sensorIdStr}
         alias={dbSensor?.alias || "Cargando..."}
         location={dbSensor?.location || "Sin ubicación"}
-        onEditPress={() => router.push(`/gateway/${sensorIdStr}/info`)}
+        onEditPress={() => {
+            if (canEdit) {
+                router.push(`/gateway/${sensorIdStr}/info`);
+            } else {
+                Alert.alert("Modo Visualizador", "Solo el propietario puede editar la configuración del Gateway.");
+            }
+        }}
         isOffline={!isConnected}
       />
 
-      <ScrollView
-        style={styles.content}
-        contentContainerStyle={{ padding: 16 }}
-      >
+      <ScrollView style={styles.content} contentContainerStyle={{ padding: 16 }}>
         {/* 1. ESTADO DE RED */}
         <View style={styles.sectionCard}>
           <Text style={styles.sectionTitle}>Estado de Conectividad</Text>
@@ -278,16 +307,15 @@ export default function GatewayDashboard() {
         <Text style={styles.sectionHeader}>Controles</Text>
         <View style={styles.grid}>
           <TouchableOpacity
-            style={[styles.actionCard, !isConnected && styles.disabledCard]}
-            disabled={!isConnected}
-            onPress={() => router.push(`/gateway/${sensorIdStr}/config`)}
+            style={[styles.actionCard, (!isConnected || !canEdit) && styles.disabledCard]}
+            disabled={!isConnected || !canEdit}
+            onPress={() => {
+                if(canEdit) router.push(`/gateway/${sensorIdStr}/config`);
+                else Alert.alert("Restringido", "Solo el propietario puede configurar el WiFi.");
+            }}
           >
             <View style={[styles.iconCircle, { backgroundColor: "#e8f5e9" }]}>
-              <MaterialCommunityIcons
-                name="wifi-cog"
-                size={28}
-                color="#2e7d32"
-              />
+              <MaterialCommunityIcons name="wifi-cog" size={28} color="#2e7d32" />
             </View>
             <Text style={styles.actionTitle}>Configurar WiFi</Text>
           </TouchableOpacity>
@@ -301,11 +329,7 @@ export default function GatewayDashboard() {
               {diagnosisStatus.syncStatus === "SENDING" ? (
                 <ActivityIndicator color={Colors.primary} />
               ) : (
-                <MaterialCommunityIcons
-                  name="send"
-                  size={28}
-                  color={Colors.primary}
-                />
+                <MaterialCommunityIcons name="send" size={28} color={Colors.primary} />
               )}
             </View>
             <Text style={styles.actionTitle}>Forzar Subida</Text>
@@ -321,8 +345,10 @@ export default function GatewayDashboard() {
             <ActivityIndicator color="#d32f2f" />
           ) : (
             <>
-              <MaterialCommunityIcons name="delete-outline" size={22} color="#d32f2f" />
-              <Text style={styles.deleteButtonText}>Desvincular Dispositivo</Text>
+              <MaterialCommunityIcons name={userRole === 'owner' ? "link-variant-off" : "delete-outline"} size={22} color="#d32f2f" />
+              <Text style={styles.deleteButtonText}>
+                  {userRole === 'owner' ? "Liberar Gateway" : "Eliminar de mi lista"}
+              </Text>
             </>
           )}
         </TouchableOpacity>
@@ -331,34 +357,22 @@ export default function GatewayDashboard() {
         <Text style={styles.sectionHeader}>Sensores en Campo (LoRa)</Text>
 
         {loraSensors.length === 0 ? (
-          <View
-            style={[styles.sectionCard, { padding: 20, alignItems: "center" }]}
-          >
-            <Text style={{ color: "#999", fontStyle: "italic" }}>
-              Esperando datos de sensores...
-            </Text>
-            <Text style={{ color: "#ccc", fontSize: 10, marginTop: 5 }}>
-              El Gateway escucha en 915MHz
-            </Text>
+          <View style={[styles.sectionCard, { padding: 20, alignItems: "center" }]}>
+            <Text style={{ color: "#999", fontStyle: "italic" }}>Esperando datos de sensores...</Text>
+            <Text style={{ color: "#ccc", fontSize: 10, marginTop: 5 }}>El Gateway escucha en 915MHz</Text>
           </View>
         ) : (
           loraSensors.map((sensor: any) => {
-            // --- LÓGICA DE BATERÍA ---
             const batPct = getBatteryPercentage(sensor.bat);
             const batColor = getBatteryColor(batPct);
-            const batIcon = getBatteryIcon(batPct); // Necesitas castear si TypeScript se queja, o asegurar que retorna string válido
+            const batIcon = getBatteryIcon(batPct); 
 
             return (
               <View key={sensor.id} style={styles.sensorCard}>
-                {/* HEADER DE LA TARJETA */}
                 <View style={styles.sensorHeader}>
                   <View style={{ flexDirection: "row", alignItems: "center" }}>
                     <MaterialCommunityIcons
-                      name={
-                        sensor.type === "C01"
-                          ? "weather-partly-cloudy"
-                          : "sprout"
-                      }
+                      name={sensor.type === "C01" ? "weather-partly-cloudy" : "sprout"}
                       size={20}
                       color={Colors.primary}
                     />
@@ -367,26 +381,17 @@ export default function GatewayDashboard() {
                       <Text style={styles.sensorTypeText}>{sensor.type}</Text>
                     </View>
                   </View>
-                  <Text style={styles.sensorTime}>
-                    {formatDateAR(sensor.last)}
-                  </Text>
+                  <Text style={styles.sensorTime}>{formatDateAR(sensor.last)}</Text>
                 </View>
 
-                {/* DATOS DEL SENSOR */}
                 <View style={styles.sensorDataRow}>
-                  {/* Dato Principal (Temp) */}
                   <View style={styles.dataItem}>
-                    <Text style={styles.dataLabel}>
-                      {sensor.type === "C01" ? "T. Aire" : "T. Suelo"}
-                    </Text>
+                    <Text style={styles.dataLabel}>{sensor.type === "C01" ? "T. Aire" : "T. Suelo"}</Text>
                     <Text style={styles.dataValue}>
-                      {sensor.v1 != null
-                        ? `${Number(sensor.v1).toFixed(1)}°C`
-                        : "--"}
+                      {sensor.v1 != null ? `${Number(sensor.v1).toFixed(1)}°C` : "--"}
                     </Text>
                   </View>
 
-                  {/* Dato Secundario (Humedad/Otro) */}
                   <View style={styles.dataItem}>
                     <Text style={styles.dataLabel}>
                       {sensor.type === "C01" ? "Humedad" : "Hum. (mV)"}
@@ -400,43 +405,20 @@ export default function GatewayDashboard() {
                     </Text>
                   </View>
 
-                  {/* Batería (UI MEJORADA) */}
                   <View style={styles.dataItem}>
                     <Text style={styles.dataLabel}>Batería</Text>
-
-                    <View
-                      style={{
-                        flexDirection: "row",
-                        alignItems: "center",
-                        gap: 4,
-                        marginTop: 2,
-                      }}
-                    >
-                      {/* Icono dinámico */}
+                    <View style={{ flexDirection: "row", alignItems: "center", gap: 4, marginTop: 2 }}>
                       <MaterialCommunityIcons
                         name={sensor.bat ? (batIcon as any) : "battery-unknown"}
                         size={18}
                         color={sensor.bat ? batColor : "#ccc"}
                       />
-                      {/* Porcentaje */}
-                      <Text
-                        style={[
-                          styles.dataValue,
-                          {
-                            color: sensor.bat ? batColor : "#555",
-                            marginTop: 0,
-                          },
-                        ]}
-                      >
+                      <Text style={[styles.dataValue, { color: sensor.bat ? batColor : "#555", marginTop: 0 }]}>
                         {sensor.bat ? `${Math.round(batPct)}%` : "--"}
                       </Text>
                     </View>
-
-                    {/* Voltaje pequeño (Opcional) */}
                     {sensor.bat ? (
-                      <Text
-                        style={{ fontSize: 9, color: "#999", marginTop: 1 }}
-                      >
+                      <Text style={{ fontSize: 9, color: "#999", marginTop: 1 }}>
                         {(sensor.bat / 1000).toFixed(2)}V
                       </Text>
                     ) : null}
@@ -446,7 +428,6 @@ export default function GatewayDashboard() {
             );
           })
         )}
-
         <View style={{ height: 40 }} />
       </ScrollView>
     </View>

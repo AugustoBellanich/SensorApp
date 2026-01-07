@@ -17,7 +17,7 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { Colors } from '../../../constants/Colors';
-import { getSensorById, saveSensor } from '../../../database/SensorRepository';
+import { getSensorById, updateSensorLocal } from '../../../database/SensorRepository';
 import { SensorEntity } from '../../../database/types';
 import { syncService } from '../../../services/syncService';
 
@@ -77,7 +77,7 @@ export default function GatewayInfoScreen() {
                 lat: loc.coords.latitude.toString(),
                 lng: loc.coords.longitude.toString()
             }));
-        } catch (_) {
+        } catch {
             Alert.alert("Error GPS", "No se pudo obtener la ubicación.");
         }
     };
@@ -104,7 +104,7 @@ export default function GatewayInfoScreen() {
                 is_synced: 0 
             };
 
-            await saveSensor(updatedSensor, false);
+            await updateSensorLocal(updatedSensor);
 
             // 2. Disparar sincronización en background
             syncService.pushChanges().catch(err => console.log("Sync diferido:", err));
@@ -112,7 +112,7 @@ export default function GatewayInfoScreen() {
             Alert.alert("Guardado", "Información actualizada localmente.");
             router.back();
 
-        } catch (error) {
+        } catch {
             Alert.alert("Error", "No se pudo guardar la información.");
         } finally {
             setIsSaving(false);

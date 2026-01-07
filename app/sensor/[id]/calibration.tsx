@@ -22,6 +22,7 @@ import { Colors } from '../../../constants/Colors';
 
 // --- DB & LÓGICA ---
 // Eliminamos saveSensor y getSensorById porque ya no tocamos la tabla sensors aquí
+import { syncService } from '@/services/syncService';
 import { getElectrodesBySensor, saveElectrode } from '../../../database/ElectrodeRepository';
 import { CalibrationPoint, ElectrodeEntity } from '../../../database/types';
 import { generateCalibrationEquations } from '../../../utils/calibration';
@@ -211,7 +212,7 @@ export default function CalibrationScreen() {
   };
   
   // ===========================================================================
-  // 4. GUARDAR (SOLO EN TABLA DEVICE_ELECTRODES)
+  // 4. GUARDAR (DB LOCAL + EMPUJAR A NUBE)
   // ===========================================================================
   const handleSave = async () => {
     if (!sensorId) return;
@@ -221,26 +222,16 @@ export default function CalibrationScreen() {
 
     const elect = ensureThreeElectrodes(electrodes)[activeTab];
 
-    // --- Validaciones ---
+    // --- Validaciones (Igual que antes) ---
     const pmp = elect.points.find(p => p.id === 'PMP');
     const cc = elect.points.find(p => p.id === 'CC');
 
-    if (!pmp || !cc) {
-      Alert.alert('Error', 'Faltan los puntos PMP o CC.');
-      return;
-    }
+    if (!pmp || !cc) { Alert.alert('Error', 'Faltan los puntos PMP o CC.'); return; }
     const pmpMv = parseFloat(pmp.mv || '0');
     const ccMv = parseFloat(cc.mv || '0');
 
-    if (pmpMv <= 0 || ccMv <= 0) {
-      Alert.alert('Datos Incompletos', 'PMP y CC deben tener un voltaje (mV) válido > 0.');
-      return;
-    }
-
-    if (!parseFloat(elect.density) || parseFloat(elect.density) <= 0) {
-         Alert.alert("Dato Requerido", "Ingrese la Densidad Aparente.");
-         return;
-    }
+    if (pmpMv <= 0 || ccMv <= 0) { Alert.alert('Datos Incompletos', 'PMP y CC deben tener un voltaje (mV) válido > 0.'); return; }
+    if (!parseFloat(elect.density) || parseFloat(elect.density) <= 0) { Alert.alert("Dato Requerido", "Ingrese la Densidad Aparente."); return; }
 
     // --- Preparar datos limpios ---
     const dbPoints: CalibrationPoint[] = elect.points
@@ -252,18 +243,14 @@ export default function CalibrationScreen() {
         }))
         .filter(p => p.mv > 0 && p.hv > 0) as CalibrationPoint[];
     
-    // --- Generar Curva ---
     const equations = generateCalibrationEquations(dbPoints);
+    if (equations.length === 0) { Alert.alert("Error Matemático", "No se pudo generar la curva. Verifique voltajes distintos."); return; }
 
-    if (equations.length === 0) {
-        Alert.alert("Error Matemático", "No se pudo generar la curva. Verifique voltajes distintos.");
-        return;
-    }
+    setLoading(true); // Bloqueamos UI
 
     try {
-        // --- GUARDADO EN DB RELACIONAL ---
-        // AHORA SOLO GUARDAMOS AQUÍ. NO TOCAMOS SENSORS.
         const uniqueElecId = `${sensorId}_E${currentIdx}`;
+        const now = new Date().toISOString();
         
         const electrodeEntity: ElectrodeEntity = {
             id: uniqueElecId,
@@ -274,14 +261,22 @@ export default function CalibrationScreen() {
             density: parseFloat(elect.density) || 0,
             points_json: JSON.stringify(dbPoints),
             equations_json: JSON.stringify(equations),
-            is_synced: 0, // Pendiente de subir a Supabase
-            updated_at: new Date().toISOString()
+            is_synced: 0, // <--- CRUCIAL: Marcar como "sucio" para subir
+            updated_at: now
         };
 
+        // 1. Guardar Localmente
         await saveElectrode(electrodeEntity);
-        console.log(`[CALIB-SAVE] Éxito guardando ${uniqueElecId} en device_electrodes.`);
+        console.log(`[CALIB-SAVE] Éxito guardando ${uniqueElecId} localmente.`);
 
-        // Actualizar UI con formato limpio (redondear visualmente)
+        // 2. Intentar subir a Nube inmediatamente
+        const isOnline = await syncService.isOnline();
+        if (isOnline) {
+             console.log("[CALIB-SAVE] Internet detectado. Subiendo...");
+             await syncService.pushChanges();
+        }
+
+        // 3. Actualizar UI Visual
         setElectrodes(prev => {
             const arr = ensureThreeElectrodes(prev);
             arr[activeTab] = {
@@ -296,11 +291,16 @@ export default function CalibrationScreen() {
             return arr;
         });
 
-        Alert.alert("Guardado", `Curva generada para Electrodo ${currentIdx}.`);
+        Alert.alert(
+            "Calibración Guardada", 
+            isOnline ? "Curva generada y sincronizada con la nube." : "Curva guardada en el celular. Se subirá cuando tengas conexión."
+        );
 
     } catch (error) {
         console.error("[CALIB-ERROR] Falló el guardado:", error);
         Alert.alert("Error", "Fallo al guardar en base de datos.");
+    } finally {
+        setLoading(false);
     }
   };
 

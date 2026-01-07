@@ -1,5 +1,5 @@
 import { useRouter } from 'expo-router';
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -22,6 +22,20 @@ export default function LoginScreen() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    const checkSession = async () => {
+      // Intentamos obtener la sesión actual
+      const { data, error } = await supabase.auth.getSession();
+      
+      // Si hay error (token inválido, etc.) o si hay sesión pero no redirigió
+      if (error) {
+        console.log("⚠️ Sesión inválida detectada en Login. Limpiando...", error.message);
+        await supabase.auth.signOut(); // Forzamos limpieza
+      }
+    };
+    checkSession();
+  }, []);
 
   // VERIFICACIÓN DE SEGURIDAD VISUAL
   const isConfigMissing = !SUPABASE_URL || SUPABASE_URL === "";

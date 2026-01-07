@@ -221,7 +221,7 @@ export default function HomeScreen() {
     setDisplayList(combined);
   }, [scannedDevices, savedSensors]);
 
-  // --- 4. ACCIÓN: CONECTAR O ENTRAR A DASHBOARD (CON VALIDACIÓN DE FORMATO) ---
+  // --- 4. ACCIÓN: CONECTAR O ENTRAR A DASHBOARD (CON VALIDACIÓN DE FORMATO Y ROLES) ---
   const handleConnectAction = async (item: SensorItem) => {
     if (isBusy || isSyncing) return;
 
@@ -229,17 +229,17 @@ export default function HomeScreen() {
       try {
         // 1. LIMPIEZA Y NORMALIZACIÓN DEL ID
         const rawId = item.device.name || item.id;
-        // Quitamos "SEN-" si existe y convertimos a mayúsculas para estandarizar
         const cleanId = rawId.replace(/^SEN-/i, "").trim().toUpperCase();
 
+        // ---------------------------------------------------------
         // 2. VALIDACIÓN DE FORMATO (NUEVO)
-        // Regex: Letra + 2 Números + Guion + 6 Alfanuméricos (Ej: B01-A1B2C3)
+        // ---------------------------------------------------------
         const idRegex = /^[A-Z]\d{2}-[A-Z0-9]{6}$/;
 
         if (!idRegex.test(cleanId)) {
             Alert.alert(
-                "Formato Inválido",
-                `El sensor "${cleanId}" no cumple con el formato estándar (Ej: B01-XXXXXX).\n\nNo se puede vincular.`
+                "Dispositivo No Compatible",
+                `"${cleanId}" no es un sensor válido.\n\nDebe cumplir el formato: TIPO-SERIE (Ej: B01-A1B2C3).`
             );
             return; // ⛔ DETENEMOS TODO AQUÍ
         }
@@ -247,21 +247,21 @@ export default function HomeScreen() {
         setOnboardingStatus("Conectando...");
         await connectToDevice(item.device);
 
-        // Verificamos una sola vez si existe localmente
+        // Verificamos si ya lo tenemos guardado localmente
         const existingLocal = await getSensorById(cleanId);
 
         if (!existingLocal) {
           setOnboardingStatus("Vinculando...");
 
-          // Detectamos tipo basado en la primera letra/números (B01, C01, N01)
-          let validatedType: "B01" | "C01" | "N01" = "B01"; // Default
+          // Detectamos tipo (B01, C01, N01)
+          let validatedType: "B01" | "C01" | "N01" = "B01"; 
           if (cleanId.startsWith("C01")) validatedType = "C01";
           else if (cleanId.startsWith("N01")) validatedType = "N01";
           
           // USAMOS LA NUEVA FUNCIÓN DEL REPO
           const result = await linkNewSensor({
             id: cleanId,
-            alias: item.name, // Usamos el nombre original o cleanId como alias inicial
+            alias: item.name, 
             type: validatedType,
             location: "Sin asignar",
             activity: "Nuevo",
@@ -272,10 +272,15 @@ export default function HomeScreen() {
 
           console.log(`[Home] Resultado vinculación: ${result.status}`);
 
+          // ---------------------------------------------------------
+          // 3. FEEDBACK SEGÚN EL ROL OBTENIDO
+          // ---------------------------------------------------------
           if (result.status === "LOCAL_ONLY") {
-            Alert.alert("Modo Local", result.message);
+            Alert.alert("Modo Visor Local", "Este sensor pertenece a otro usuario. Podrás ver datos en vivo por Bluetooth, pero no se guardarán en la nube.");
           } else if (result.status === "EDITOR_CONFIRMED") {
-            Alert.alert("Sincronizado", result.message);
+            Alert.alert("Sincronizado", "Permisos de editor recuperados correctamente.");
+          } else if (result.status === "OWNER") {
+             // Opcional: Toast o mensaje de éxito sutil
           }
 
           await loadSensorsFromDB();
@@ -286,13 +291,13 @@ export default function HomeScreen() {
           const route = item.type === "N01" ? "gateway" : "sensor";
           router.push(`/${route}/${cleanId}/dashboard`);
         }, 200);
+
       } catch (e) {
         console.error(e);
         setOnboardingStatus(null);
-        Alert.alert("Error", "No se pudo conectar.");
+        Alert.alert("Error", "No se pudo conectar con el sensor.");
       }
     } else if (item.isSaved) {
-      // Si ya está guardado, entramos directo (se asume que ya fue validado al crearse)
       const route = item.type === "N01" ? "gateway" : "sensor";
       router.push(`/${route}/${item.id}/dashboard`);
     }
