@@ -8,7 +8,7 @@ import React, {
   useRef,
   useState,
 } from "react";
-import { PermissionsAndroid, Platform } from "react-native";
+import { Alert, PermissionsAndroid, Platform } from "react-native";
 import {
   BleManager,
   ConnectionPriority,
@@ -467,6 +467,23 @@ export const BleProvider = ({ children }: { children: React.ReactNode }) => {
         } catch {}
         pendingDisconnectId.current = null;
         await sleep(500); 
+    }
+
+    // --- AGREGAR ESTO ---
+    if (Platform.OS === 'android') {
+        const userAccepted = await new Promise<boolean>((resolve) => {
+            Alert.alert(
+                "Permiso de Ubicación Requerido",
+                "Para encontrar y conectarse a los sensores INTA vía Bluetooth, esta aplicación necesita acceso a su ubicación. " +
+                "La ubicación se usa únicamente para escanear dispositivos cercanos.", // Si no guardas la posición GPS, acláralo.
+                [
+                    { text: "Cancelar", onPress: () => resolve(false), style: "cancel" },
+                    { text: "Continuar", onPress: () => resolve(true) }
+                ]
+            );
+        });
+
+        if (!userAccepted) return;
     }
 
     const perm = await requestPermissions();

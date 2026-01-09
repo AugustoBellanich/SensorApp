@@ -10,7 +10,7 @@ export default ({ config }) => {
     icon: "./assets/images/icon.png",
     scheme: "sensorapp",
     userInterfaceStyle: "light",
-    newArchEnabled: true,
+    newArchEnabled: false,
 
     // Configuración Global (iOS y Default)
     splash: {
@@ -71,7 +71,7 @@ export default ({ config }) => {
       [
         "@config-plugins/react-native-ble-plx",
         {
-          "isBackgroundEnabled": true,
+          "isBackgroundEnabled": false,
           "modes": ["central"],
           "bluetoothAlwaysPermission": "Permitir a Sensor App conectarse a los sensores",
         }
