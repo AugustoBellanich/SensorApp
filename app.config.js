@@ -10,11 +10,11 @@ export default ({ config }) => {
     icon: "./assets/images/icon.png",
     scheme: "sensorapp",
     userInterfaceStyle: "light",
-    newArchEnabled: false,
+    newArchEnabled: true,
 
     // Configuración Global (iOS y Default)
     splash: {
-      image: "./assets/images/splash.png",
+      image: "./assets/images/isologotipo_light.png",
       resizeMode: "contain",
       backgroundColor: "#ffffff"
     },
@@ -30,7 +30,7 @@ export default ({ config }) => {
       
       // --- CORRECCIÓN AQUÍ: Forzar Splash en Android ---
       splash: {
-        image: "./assets/images/splash.png",
+        image: "./assets/images/isologotipo_light.png",
         resizeMode: "contain", // Asegura que entre toda la imagen
         backgroundColor: "#ffffff",
         // dark: { ... } // Opcional si tienes modo oscuro
@@ -54,9 +54,9 @@ export default ({ config }) => {
         "expo-splash-screen",
         {
           "backgroundColor": "#ffffff",
-          "image": "./assets/images/splash.png",
+          "image": "./assets/images/isologotipo_light.png",
           "resizeMode": "contain",
-          "imageWidth": 200 // Un valor seguro si el automático falla
+          "imageWidth": 180 // Un valor seguro si el automático falla
         }
       ],
       [

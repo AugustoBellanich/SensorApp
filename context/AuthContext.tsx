@@ -1,6 +1,8 @@
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Session } from '@supabase/supabase-js';
 import React, { createContext, useContext, useEffect, useState } from 'react';
-import { supabase } from '../lib/supabase'; // Asegúrate de que esta ruta sea correcta
+import { db } from '../database/DatabaseInit';
+import { supabase } from '../lib/supabase';
 
 type AuthContextType = {
   session: Session | null;
@@ -39,6 +41,26 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
   }, []);
 
   const signOut = async () => {
+    try {
+        console.log("🧹 Limpiando base de datos y caché de sincronización...");
+        
+        // A. Borrar tablas SQLITE (Lo que ya hiciste)
+        await db.execAsync(`
+            DELETE FROM sensors;
+            DELETE FROM device_electrodes; 
+            DELETE FROM readings_b01; 
+            DELETE FROM readings_c01;
+        `);
+
+        // B. BORRAR LA FECHA DE ÚLTIMA SYNC (¡ESTO ES LO NUEVO!) 🔑
+        // Esto obliga a que el próximo Login haga un "Full Pull"
+        await AsyncStorage.removeItem("LAST_SYNC_TIMESTAMP"); 
+
+    } catch (e) {
+        console.error("Error limpiando datos locales:", e);
+    }
+
+    // C. Cerrar sesión en Nube
     await supabase.auth.signOut();
   };
 

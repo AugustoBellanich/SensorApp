@@ -247,21 +247,21 @@ export default function SensorDashboard() {
 
       {/* BADGE DE ROL */}
        <View style={{ 
-          backgroundColor: userRole === 'owner' ? '#e8f5e9' : '#fff3e0', 
-          paddingVertical: 4, paddingHorizontal: 16,
-          flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: 6
+         backgroundColor: userRole === 'owner' ? '#e8f5e9' : (userRole === 'editor' ? '#e3f2fd' : '#fff3e0'), 
+         paddingVertical: 4, paddingHorizontal: 16,
+         flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: 6
        }}>
           <MaterialCommunityIcons 
-             name={userRole === 'owner' ? "shield-check" : "eye-outline"} 
+             name={userRole === 'owner' ? "shield-check" : (userRole === 'editor' ? "file-edit-outline" : "eye-outline")} 
              size={14} 
-             color={userRole === 'owner' ? "#2e7d32" : "#ef6c00"} 
+             color={userRole === 'owner' ? "#2e7d32" : (userRole === 'editor' ? "#1565c0" : "#ef6c00")} 
           />
           <Text style={{ 
              fontSize: 12, fontWeight: 'bold', 
-             color: userRole === 'owner' ? "#2e7d32" : "#ef6c00",
+             color: userRole === 'owner' ? "#2e7d32" : (userRole === 'editor' ? "#1565c0" : "#ef6c00"),
              textTransform: 'uppercase'
           }}>
-             {userRole === 'owner' ? "Administrador (Dueño)" : "Modo Visualizador"}
+             {userRole === 'owner' ? "Administrador (Dueño)" : (userRole === 'editor' ? "Editor" : "Modo Visualizador")}
           </Text>
        </View>
 
@@ -274,7 +274,7 @@ export default function SensorDashboard() {
             if (canEdit) {
                 router.push(`/sensor/${sensorIdStr}/info`);
             } else {
-                Alert.alert("Modo Visualizador", "Solo el propietario puede editar la configuración del sensor.");
+                Alert.alert("Modo Visualizador", "No tienes permisos para editar este sensor.");
             }
         }}
         isOffline={!isConnected}

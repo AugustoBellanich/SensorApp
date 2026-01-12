@@ -41,7 +41,7 @@ const withTimeout = <T,>(
 // 30s es seguro para el N01
 const CONNECTION_TIMEOUT_MS = 30000;
 
-// Intervalo de lectura de datos (Polling) en ms. 
+// Intervalo de lectura de datos (Polling) en ms.
 const POLLING_INTERVAL_MS = 2000;
 
 const logTrace = (step: string, msg: string) =>
@@ -112,14 +112,6 @@ const INITIAL_DIAGNOSIS_STATUS: DiagnosisStatus = {
   rtcStatus: "ERROR",
 };
 
-const STD_UUIDS = {
-  DEV_INFO_SVC: "0000180a-0000-1000-8000-00805f9b34fb",
-  MODEL_NUM: "00002a24-0000-1000-8000-00805f9b34fb",
-  SERIAL_NUM: "00002a25-0000-1000-8000-00805f9b34fb",
-  BATTERY_SVC: "0000180f-0000-1000-8000-00805f9b34fb",
-  BATTERY_LVL: "00002a19-0000-1000-8000-00805f9b34fb",
-};
-
 // --- HELPERS DECODIFICACION ---
 const base64ToUtf8 = (value?: string | null): string => {
   if (!value) return "";
@@ -178,7 +170,7 @@ export const BleProvider = ({ children }: { children: React.ReactNode }) => {
 
   const isScanningRef = useRef(false);
   const isDisconnectingRef = useRef(false);
-  
+
   // Referencias para limpieza
   const activeSubscriptions = useRef<Subscription[]>([]);
   // Usamos 'any' para evitar conflictos entre Timeout de Node y number de Web
@@ -241,7 +233,7 @@ export const BleProvider = ({ children }: { children: React.ReactNode }) => {
             .isDeviceConnected(deviceId)
             .catch(() => false);
           if (!isAlive) return null;
-          
+
           const char = await manager.readCharacteristicForDevice(
             deviceId,
             serviceUUID,
@@ -250,8 +242,11 @@ export const BleProvider = ({ children }: { children: React.ReactNode }) => {
           return char?.value || null;
         } catch (e: any) {
           // Ignoramos errores si estamos desconectando
-          if (isDisconnectingRef.current || e.message?.includes("not connected")) {
-             return null;
+          if (
+            isDisconnectingRef.current ||
+            e.message?.includes("not connected")
+          ) {
+            return null;
           }
           console.log(`[READ-ERR] ${uuidShort}: ${e.message}`);
           return null;
@@ -293,7 +288,9 @@ export const BleProvider = ({ children }: { children: React.ReactNode }) => {
 
       if (rawModel === "UNKNOWN" && !isDisconnectingRef.current) {
         try {
-          console.log("[DEV-INFO] Nombre desconocido, intentando lectura nativa...");
+          console.log(
+            "[DEV-INFO] Nombre desconocido, intentando lectura nativa..."
+          );
           const modelChar = await safeReadCharacteristic(
             device.id,
             BLE_UUIDS.SVC_DEVICE_INFO,
@@ -301,7 +298,9 @@ export const BleProvider = ({ children }: { children: React.ReactNode }) => {
           );
           if (modelChar) rawModel = base64ToUtf8(modelChar);
         } catch {
-          console.log("[DEV-INFO] Lectura nativa falló o bloqueada por ProGuard.");
+          console.log(
+            "[DEV-INFO] Lectura nativa falló o bloqueada por ProGuard."
+          );
         }
       }
 
@@ -330,24 +329,52 @@ export const BleProvider = ({ children }: { children: React.ReactNode }) => {
           return status;
         }
 
-        const sdEn = await safeReadCharacteristic(device.id, BLE_UUIDS.SVC_CONFIG, BLE_UUIDS.CONFIG.SD_ENABLE);
-        if (isDisconnectingRef.current) return status; await sleep(50);
+        const sdEn = await safeReadCharacteristic(
+          device.id,
+          BLE_UUIDS.SVC_CONFIG,
+          BLE_UUIDS.CONFIG.SD_ENABLE
+        );
+        if (isDisconnectingRef.current) return status;
+        await sleep(50);
 
-        const loraEn = await safeReadCharacteristic(device.id, BLE_UUIDS.SVC_CONFIG, BLE_UUIDS.CONFIG.LORA_ENABLE);
-        if (isDisconnectingRef.current) return status; await sleep(50);
+        const loraEn = await safeReadCharacteristic(
+          device.id,
+          BLE_UUIDS.SVC_CONFIG,
+          BLE_UUIDS.CONFIG.LORA_ENABLE
+        );
+        if (isDisconnectingRef.current) return status;
+        await sleep(50);
 
-        const sdSt = await safeReadCharacteristic(device.id, BLE_UUIDS.SVC_STATUS, BLE_UUIDS.CHAR_SD_STATUS);
-        if (isDisconnectingRef.current) return status; await sleep(50);
+        const sdSt = await safeReadCharacteristic(
+          device.id,
+          BLE_UUIDS.SVC_STATUS,
+          BLE_UUIDS.CHAR_SD_STATUS
+        );
+        if (isDisconnectingRef.current) return status;
+        await sleep(50);
 
-        const loraSt = await safeReadCharacteristic(device.id, BLE_UUIDS.SVC_STATUS, BLE_UUIDS.CHAR_LORA_STATUS);
-        if (isDisconnectingRef.current) return status; await sleep(50);
+        const loraSt = await safeReadCharacteristic(
+          device.id,
+          BLE_UUIDS.SVC_STATUS,
+          BLE_UUIDS.CHAR_LORA_STATUS
+        );
+        if (isDisconnectingRef.current) return status;
+        await sleep(50);
 
-        const rtcSt = await safeReadCharacteristic(device.id, BLE_UUIDS.SVC_STATUS, BLE_UUIDS.CHAR_RTC_STATUS);
+        const rtcSt = await safeReadCharacteristic(
+          device.id,
+          BLE_UUIDS.SVC_STATUS,
+          BLE_UUIDS.CHAR_RTC_STATUS
+        );
 
         if (category === "GATEWAY" && !isDisconnectingRef.current) {
           await sleep(100);
           try {
-            const ws = await safeReadCharacteristic(device.id, BLE_UUIDS.SVC_STATUS, BLE_UUIDS.STATUS.WIFI_STATUS);
+            const ws = await safeReadCharacteristic(
+              device.id,
+              BLE_UUIDS.SVC_STATUS,
+              BLE_UUIDS.STATUS.WIFI_STATUS
+            );
             status.wifiStatus = base64ToUtf8(ws);
           } catch {}
         }
@@ -362,7 +389,7 @@ export const BleProvider = ({ children }: { children: React.ReactNode }) => {
         status.syncStatus = "IDLE";
 
         if (!isDisconnectingRef.current) {
-            logTrace("DIAGNOSIS", "✅ Finalizada");
+          logTrace("DIAGNOSIS", "✅ Finalizada");
         }
         return status;
       } catch (e) {
@@ -385,7 +412,9 @@ export const BleProvider = ({ children }: { children: React.ReactNode }) => {
     }
     // 2. Limpiamos suscripciones nativas si las hubiera
     activeSubscriptions.current.forEach((sub) => {
-      try { if (sub) sub.remove(); } catch {}
+      try {
+        if (sub) sub.remove();
+      } catch {}
     });
     activeSubscriptions.current = [];
   }, []);
@@ -395,21 +424,61 @@ export const BleProvider = ({ children }: { children: React.ReactNode }) => {
       stopMonitoringData();
       logTrace("MONITOR", `Iniciando Polling (Modo Seguro - ${category})`);
 
-      const charsToRead: { service: string; char: string; updateKey: string; isBinary: boolean }[] = [
-        { service: BLE_UUIDS.SVC_BATTERY, char: BLE_UUIDS.CHAR_BATTERY_LVL, updateKey: "battery", isBinary: true },
+      const charsToRead: {
+        service: string;
+        char: string;
+        updateKey: string;
+        isBinary: boolean;
+      }[] = [
+        {
+          service: BLE_UUIDS.SVC_BATTERY,
+          char: BLE_UUIDS.CHAR_BATTERY_LVL,
+          updateKey: "battery",
+          isBinary: true,
+        },
       ];
 
       if (category === "SOIL") {
         charsToRead.push(
-          { service: BLE_UUIDS.SVC_SENSORS, char: BLE_UUIDS.B01.TEMP_SOIL, updateKey: "soilTemp", isBinary: false },
-          { service: BLE_UUIDS.SVC_SENSORS, char: BLE_UUIDS.B01.MOIST_1, updateKey: "moisture1", isBinary: false },
-          { service: BLE_UUIDS.SVC_SENSORS, char: BLE_UUIDS.B01.MOIST_2, updateKey: "moisture2", isBinary: false },
-          { service: BLE_UUIDS.SVC_SENSORS, char: BLE_UUIDS.B01.MOIST_3, updateKey: "moisture3", isBinary: false }
+          {
+            service: BLE_UUIDS.SVC_SENSORS,
+            char: BLE_UUIDS.B01.TEMP_SOIL,
+            updateKey: "soilTemp",
+            isBinary: false,
+          },
+          {
+            service: BLE_UUIDS.SVC_SENSORS,
+            char: BLE_UUIDS.B01.MOIST_1,
+            updateKey: "moisture1",
+            isBinary: false,
+          },
+          {
+            service: BLE_UUIDS.SVC_SENSORS,
+            char: BLE_UUIDS.B01.MOIST_2,
+            updateKey: "moisture2",
+            isBinary: false,
+          },
+          {
+            service: BLE_UUIDS.SVC_SENSORS,
+            char: BLE_UUIDS.B01.MOIST_3,
+            updateKey: "moisture3",
+            isBinary: false,
+          }
         );
       } else if (category === "CLIMATE") {
         charsToRead.push(
-          { service: BLE_UUIDS.SVC_SENSORS, char: BLE_UUIDS.C01.TEMP_AMB, updateKey: "airTemp", isBinary: false },
-          { service: BLE_UUIDS.SVC_SENSORS, char: BLE_UUIDS.C01.HUM_AMB, updateKey: "humidity", isBinary: false }
+          {
+            service: BLE_UUIDS.SVC_SENSORS,
+            char: BLE_UUIDS.C01.TEMP_AMB,
+            updateKey: "airTemp",
+            isBinary: false,
+          },
+          {
+            service: BLE_UUIDS.SVC_SENSORS,
+            char: BLE_UUIDS.C01.HUM_AMB,
+            updateKey: "humidity",
+            isBinary: false,
+          }
         );
       }
 
@@ -417,26 +486,28 @@ export const BleProvider = ({ children }: { children: React.ReactNode }) => {
         if (!device || isDisconnectingRef.current) return;
 
         for (const target of charsToRead) {
-          if (isDisconnectingRef.current) break; 
+          if (isDisconnectingRef.current) break;
 
           try {
-            const char = await manager.readCharacteristicForDevice(
-               device.id, 
-               target.service, 
-               target.char
-            ).catch(() => null);
+            const char = await manager
+              .readCharacteristicForDevice(
+                device.id,
+                target.service,
+                target.char
+              )
+              .catch(() => null);
 
             if (char && char.value && !isDisconnectingRef.current) {
-               const val = target.isBinary
-                 ? decodeBinaryByte(char.value)
-                 : decodeNumericString(char.value);
-               
-               if (!isNaN(val)) {
-                  setSensorData((prev) => ({ ...prev, [target.updateKey]: val }));
-               }
+              const val = target.isBinary
+                ? decodeBinaryByte(char.value)
+                : decodeNumericString(char.value);
+
+              if (!isNaN(val)) {
+                setSensorData((prev) => ({ ...prev, [target.updateKey]: val }));
+              }
             }
           } catch {
-             // Ignoramos errores puntuales
+            // Ignoramos errores puntuales
           }
         }
       };
@@ -444,10 +515,13 @@ export const BleProvider = ({ children }: { children: React.ReactNode }) => {
       await readAllSensors();
 
       if (!isDisconnectingRef.current) {
-         pollingIntervalRef.current = setInterval(readAllSensors, POLLING_INTERVAL_MS);
+        pollingIntervalRef.current = setInterval(
+          readAllSensors,
+          POLLING_INTERVAL_MS
+        );
       }
     },
-    [stopMonitoringData, manager] 
+    [stopMonitoringData, manager]
   );
 
   // ----------------------------------------------------------------
@@ -459,37 +533,67 @@ export const BleProvider = ({ children }: { children: React.ReactNode }) => {
     updateScanningState(false);
   }, [manager]);
 
+  // Agrega esta función helper arriba o úsala dentro de startScan
+  const checkLocationPermission = async () => {
+    if (Platform.OS === "android" && (DeviceInfo.platformApiLevel ?? -1) < 31) {
+      return await PermissionsAndroid.check(
+        PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION
+      );
+    }
+    // Para Android 12+ (API 31+), chequeamos los permisos de Bluetooth
+    if (
+      Platform.OS === "android" &&
+      (DeviceInfo.platformApiLevel ?? -1) >= 31
+    ) {
+      const scan = await PermissionsAndroid.check(
+        PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN
+      );
+      const connect = await PermissionsAndroid.check(
+        PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT
+      );
+      return scan && connect;
+    }
+    return true; // iOS u otros casos
+  };
+
   const startScan = useCallback(async () => {
+    // 1. Limpieza de zombies (igual que antes)
     if (pendingDisconnectId.current) {
-        console.log(`[SCAN] Limpiando conexión zombie: ${pendingDisconnectId.current}`);
-        try {
-            await manager.cancelDeviceConnection(pendingDisconnectId.current);
-        } catch {}
+        try { await manager.cancelDeviceConnection(pendingDisconnectId.current); } catch {}
         pendingDisconnectId.current = null;
         await sleep(500); 
     }
 
-    // --- AGREGAR ESTO ---
-    if (Platform.OS === 'android') {
+    // 2. VERIFICACIÓN INTELIGENTE (Lo nuevo)
+    const hasPermission = await checkLocationPermission();
+
+    if (!hasPermission && Platform.OS === 'android') {
+        // SOLO si NO tenemos permiso, mostramos tu mensaje explicativo
         const userAccepted = await new Promise<boolean>((resolve) => {
             Alert.alert(
-                "Permiso de Ubicación Requerido",
-                "Para encontrar y conectarse a los sensores INTA vía Bluetooth, esta aplicación necesita acceso a su ubicación. " +
-                "La ubicación se usa únicamente para escanear dispositivos cercanos.", // Si no guardas la posición GPS, acláralo.
+                "Permiso requerido", // Título más corto
+                "Para detectar los sensores cercanos, la aplicación necesita activar el escaneo Bluetooth. " + 
+                "En algunas versiones de Android, esto requiere acceso a la ubicación fina. " +
+                "La app no guarda su posición GPS.", 
                 [
-                    { text: "Cancelar", onPress: () => resolve(false), style: "cancel" },
+                    { text: "No escanear", onPress: () => resolve(false), style: "cancel" },
                     { text: "Continuar", onPress: () => resolve(true) }
                 ]
             );
         });
 
-        if (!userAccepted) return;
+        if (!userAccepted) return; // Si dice que no, cancelamos
     }
 
+    // 3. Pedimos el permiso al sistema (Si ya lo tiene, esto no hace nada visualmente)
     const perm = await requestPermissions();
-    if (!perm || isScanningRef.current) return;
+    if (!perm) return; // Si al final el sistema dijo que no, salimos
+
+    // 4. Iniciar escaneo real (Igual que antes)
+    if (isScanningRef.current) return;
     setScannedDevices([]);
     updateScanningState(true);
+    
     manager.startDeviceScan(
       null,
       { scanMode: ScanMode.LowLatency },
@@ -509,41 +613,43 @@ export const BleProvider = ({ children }: { children: React.ReactNode }) => {
 
   const disconnectDevice = useCallback(async () => {
     if (isDisconnectingRef.current) return;
-    
+
     if (connectedDevice) {
       setIsBusy(true);
       isDisconnectingRef.current = true;
-      
+
       console.log("[BLE] Desconectando: Deteniendo Polling (Seguro)...");
-      
+
       // 1. Detener el polling
       stopMonitoringData();
 
       try {
-          const isAlive = await manager.isDeviceConnected(connectedDevice.id).catch(() => false);
-          if (isAlive) {
-            await connectedDevice.cancelConnection();
-            console.log("[BLE] Conexión cancelada exitosamente");
-          }
+        const isAlive = await manager
+          .isDeviceConnected(connectedDevice.id)
+          .catch(() => false);
+        if (isAlive) {
+          await connectedDevice.cancelConnection();
+          console.log("[BLE] Conexión cancelada exitosamente");
+        }
       } catch (e) {
-          console.log("[BLE] Error al cancelar conexión:", e);
+        console.log("[BLE] Error al cancelar conexión:", e);
       }
 
       setConnectedDevice(null);
       setSensorInfo(null);
       setSensorData({});
-      setDiagnosisStatus(INITIAL_DIAGNOSIS_STATUS); 
-      
+      setDiagnosisStatus(INITIAL_DIAGNOSIS_STATUS);
+
       // 2. Zombie killer set
       pendingDisconnectId.current = connectedDevice.id;
       const deviceId = connectedDevice.id;
       setTimeout(async () => {
-          try {
-             if (pendingDisconnectId.current === deviceId) {
-                 await manager.cancelDeviceConnection(deviceId);
-                 pendingDisconnectId.current = null;
-             }
-          } catch {}
+        try {
+          if (pendingDisconnectId.current === deviceId) {
+            await manager.cancelDeviceConnection(deviceId);
+            pendingDisconnectId.current = null;
+          }
+        } catch {}
       }, 2000);
 
       isDisconnectingRef.current = false;
@@ -563,10 +669,15 @@ export const BleProvider = ({ children }: { children: React.ReactNode }) => {
           await disconnectDevice();
           await sleep(500);
         }
-        
-        if (pendingDisconnectId.current && pendingDisconnectId.current !== device.id) {
-             try { await manager.cancelDeviceConnection(pendingDisconnectId.current); } catch {}
-             pendingDisconnectId.current = null;
+
+        if (
+          pendingDisconnectId.current &&
+          pendingDisconnectId.current !== device.id
+        ) {
+          try {
+            await manager.cancelDeviceConnection(pendingDisconnectId.current);
+          } catch {}
+          pendingDisconnectId.current = null;
         }
 
         isDisconnectingRef.current = false;
@@ -598,9 +709,9 @@ export const BleProvider = ({ children }: { children: React.ReactNode }) => {
           connected,
           info.category
         );
-        
+
         if (isDisconnectingRef.current) {
-             throw new Error("Desconexión solicitada durante el inicio");
+          throw new Error("Desconexión solicitada durante el inicio");
         }
 
         setDiagnosisStatus(diagnosis);
@@ -613,7 +724,7 @@ export const BleProvider = ({ children }: { children: React.ReactNode }) => {
 
         const discSub = connected.onDisconnected(() => {
           logTrace("DISCONNECT", "Inesperada");
-          stopMonitoringData(); 
+          stopMonitoringData();
           setConnectedDevice(null);
           setDiagnosisStatus(INITIAL_DIAGNOSIS_STATUS);
           discSub.remove();
@@ -627,7 +738,7 @@ export const BleProvider = ({ children }: { children: React.ReactNode }) => {
         setConnectedDevice(null);
         if (error.message?.includes("keep awake")) return;
         if (!isDisconnectingRef.current) {
-            throw error;
+          throw error;
         }
       } finally {
         setIsBusy(false);

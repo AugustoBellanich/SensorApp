@@ -5,6 +5,7 @@ import {
   Alert,
   Image,
   KeyboardAvoidingView,
+  Linking,
   Platform,
   StyleSheet,
   Text,
@@ -91,7 +92,7 @@ export default function LoginScreen() {
             <Text style={localStyles.label}>Usuario (Email)</Text>
             <TextInput 
               style={localStyles.input}
-              placeholder="usuario@inta.gob.ar"
+              placeholder="usuario@email.com"
               autoCapitalize="none"
               value={email}
               onChangeText={setEmail}
@@ -123,8 +124,26 @@ export default function LoginScreen() {
         </View>
       </KeyboardAvoidingView>
       
-      {/* 3. Texto Fijo (Fuera del KeyboardAvoidingView) */}
-      <Text style={localStyles.versionText}>v0.0.1 - Dev - INTA EEA Catamarca</Text>
+      {/* 3. Pie de página: Versión, Copyright y Política */}
+      <View style={localStyles.footerContainer}>
+        
+        {/* Versión */}
+        <Text style={localStyles.footerText}>SENSOR App v0.0.1</Text>
+        
+        {/* Copyright */}
+        <Text style={localStyles.footerText}>© 2026 Proyecto SENSOR</Text>
+
+        {/* Link a Política de Privacidad */}
+        <TouchableOpacity 
+          onPress={() => Linking.openURL('https://docs.google.com/document/d/1THh1l9COVryfXFRGs47MNe9rPnJuGhcL4Sd_Nh6beCY/edit?usp=sharing')}
+          style={{ marginTop: 8, padding: 5 }}
+        >
+          <Text style={localStyles.linkText}>
+            Política de Privacidad
+          </Text>
+        </TouchableOpacity>
+
+      </View>
     </View>
   );
 }
@@ -169,5 +188,23 @@ const localStyles = StyleSheet.create({
     alignSelf: 'center', // Centrado horizontalmente
     color: Colors.textSecondary,
     fontSize: 12
+  },
+  footerContainer: {
+    position: 'absolute',
+    bottom: 30, // Margen desde abajo
+    width: '100%',
+    alignItems: 'center',
+    paddingBottom: 10,
+  },
+  footerText: {
+    color: Colors.textSecondary,
+    fontSize: 12,
+    marginBottom: 2, // Espacio entre líneas
+  },
+  linkText: {
+    color: '#007AFF', // Azul estándar de enlaces
+    fontSize: 12,
+    textDecorationLine: 'underline',
+    fontWeight: '500',
   }
 });

@@ -13,19 +13,20 @@ import {
 import { Device } from "react-native-ble-plx";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Colors } from "../../constants/Colors";
+import { useAuth } from "../../context/AuthContext";
 import { useBle } from "../../context/BleContext";
 
 // --- DB & SYNC ---
 import {
   getAllSensors,
   getSensorById,
+  getSensorsPendingSync,
   linkNewSensor,
 } from "../../database/SensorRepository";
 import { SensorEntity } from "../../database/types";
 import { syncService } from "../../services/syncService";
 
 // --- SUPABASE ---
-import { supabase } from "../../lib/supabase";
 
 // Variable global para controlar la sincronización por sesión de app
 let isSessionSynced = false;
@@ -75,27 +76,57 @@ export default function HomeScreen() {
     clearScannedDevices,
   } = useBle();
 
+  const { signOut } = useAuth();
   const [displayList, setDisplayList] = useState<SensorItem[]>([]);
   const [savedSensors, setSavedSensors] = useState<SensorEntity[]>([]);
   const [isSyncing, setIsSyncing] = useState(false);
   const [onboardingStatus, setOnboardingStatus] = useState<string | null>(null);
 
-  // --- ACCIÓN: CERRAR SESIÓN ---
-  const handleLogout = () => {
-    Alert.alert("Cerrar Sesión", "¿Estás seguro de que quieres salir?", [
+  // --- ACCIÓN: CERRAR SESIÓN SEGURA ---
+  const handleLogout = async () => {
+    // 1. Verificar si hay datos pendientes de subir antes de borrar todo
+    let hasPendingData = false;
+    try {
+      const pendingSensors = await getSensorsPendingSync();
+      if (pendingSensors.length > 0) hasPendingData = true;
+      // (Opcional: aquí podrías consultar también tablas de lecturas pendientes si quieres ser muy estricto)
+    } catch {}
+
+    // 2. Definir el mensaje según el riesgo
+    const title = "Cerrar Sesión";
+    let message =
+      "¿Estás seguro de que quieres salir?\n\nSe borrarán los datos locales de este dispositivo para proteger tu cuenta.";
+
+    if (hasPendingData) {
+      message =
+        "⚠️ ¡CUIDADO! Tienes datos SIN SINCRONIZAR.\n\nSi cierras sesión ahora, PERDERÁS los cambios que no han subido a la nube.\n\n¿Quieres salir de todos modos?";
+    }
+
+    Alert.alert(title, message, [
       { text: "Cancelar", style: "cancel" },
       {
-        text: "Salir",
+        text: hasPendingData ? "Salir y Perder Datos" : "Salir",
         style: "destructive",
         onPress: async () => {
           try {
             setIsSyncing(true);
-            await supabase.auth.signOut();
-            isSessionSynced = false;
-            // Si tu pantalla de login no es "/", cambia esto por la ruta correcta
+
+            // 1. Navegar al Login
             router.replace("/");
-          } catch {
-            Alert.alert("Error", "No se pudo cerrar la sesión.");
+
+            // 2. Limpiar DB Local (AuthContext)
+            await signOut();
+
+            // 3. LA CORRECCIÓN CLAVE:
+            // Decirle al Home que la próxima vez DEBE sincronizar de nuevo
+            isSessionSynced = false;
+
+            // Reiniciamos variable global de sesión
+            // (Asegúrate de exportar/importar isSessionSynced si está en otro archivo, o moverla dentro del contexto)
+            // isSessionSynced = false;
+          } catch (e) {
+            console.error("Error al salir:", e);
+            Alert.alert("Error", "No se pudo cerrar la sesión correctamente.");
           } finally {
             setIsSyncing(false);
           }
@@ -117,21 +148,47 @@ export default function HomeScreen() {
   // --- 1. SINCRONIZACIÓN INICIAL ---
   useEffect(() => {
     const initSync = async () => {
-      if (isSessionSynced) {
-        await loadSensorsFromDB();
-        return;
+      // 1. Primero cargamos lo que haya en la DB
+      const localSensors = await getAllSensors();
+      setSavedSensors(localSensors);
+
+      // 2. Si ya sincronizamos en esta sesión, no molestamos más
+      if (isSessionSynced) return;
+
+      // 3. DETECCIÓN DE "RESTAURACIÓN" (Login Nuevo)
+      // Si no tengo sensores locales, asumo que acabo de instalar o loguearme
+      const needsFullRestore = localSensors.length === 0;
+
+      if (needsFullRestore) {
+        setOnboardingStatus("Restaurando tus sensores desde la nube..."); // Mostramos Overlay
+      } else {
+        setIsSyncing(true); // Sync silencioso (spinner chico arriba)
       }
-      setIsSyncing(true);
+
       try {
+        // Ejecutamos la sincronización
         await syncService.syncAll();
+
+        // 4. IMPORTANTE: Recargar la DB después de bajar datos
+        const updatedSensors = await getAllSensors();
+        setSavedSensors(updatedSensors);
+
         isSessionSynced = true;
-        await loadSensorsFromDB();
+        console.log(
+          `[Home] Restauración completada. ${updatedSensors.length} sensores recuperados.`
+        );
       } catch (e) {
         console.log("Sync warning:", e);
+        Alert.alert(
+          "Aviso",
+          "No se pudieron recuperar los datos de la nube. Revisa tu conexión."
+        );
       } finally {
         setIsSyncing(false);
+        setOnboardingStatus(null); // Ocultamos Overlay
       }
     };
+
     initSync();
   }, []);
 
@@ -237,11 +294,11 @@ export default function HomeScreen() {
         const idRegex = /^[A-Z]\d{2}-[A-Z0-9]{6}$/;
 
         if (!idRegex.test(cleanId)) {
-            Alert.alert(
-                "Dispositivo No Compatible",
-                `"${cleanId}" no es un sensor válido.\n\nDebe cumplir el formato: TIPO-SERIE (Ej: B01-A1B2C3).`
-            );
-            return; // ⛔ DETENEMOS TODO AQUÍ
+          Alert.alert(
+            "Dispositivo No Compatible",
+            `"${cleanId}" no es un sensor válido.\n\nDebe cumplir el formato: TIPO-SERIE (Ej: B01-A1B2C3).`
+          );
+          return; // ⛔ DETENEMOS TODO AQUÍ
         }
 
         setOnboardingStatus("Conectando...");
@@ -254,14 +311,14 @@ export default function HomeScreen() {
           setOnboardingStatus("Vinculando...");
 
           // Detectamos tipo (B01, C01, N01)
-          let validatedType: "B01" | "C01" | "N01" = "B01"; 
+          let validatedType: "B01" | "C01" | "N01" = "B01";
           if (cleanId.startsWith("C01")) validatedType = "C01";
           else if (cleanId.startsWith("N01")) validatedType = "N01";
-          
+
           // USAMOS LA NUEVA FUNCIÓN DEL REPO
           const result = await linkNewSensor({
             id: cleanId,
-            alias: item.name, 
+            alias: item.name,
             type: validatedType,
             location: "Sin asignar",
             activity: "Nuevo",
@@ -276,11 +333,17 @@ export default function HomeScreen() {
           // 3. FEEDBACK SEGÚN EL ROL OBTENIDO
           // ---------------------------------------------------------
           if (result.status === "LOCAL_ONLY") {
-            Alert.alert("Modo Visor Local", "Este sensor pertenece a otro usuario. Podrás ver datos en vivo por Bluetooth, pero no se guardarán en la nube.");
+            Alert.alert(
+              "Modo Visor Local",
+              "Este sensor pertenece a otro usuario. Podrás ver datos en vivo por Bluetooth, pero no se guardarán en la nube."
+            );
           } else if (result.status === "EDITOR_CONFIRMED") {
-            Alert.alert("Sincronizado", "Permisos de editor recuperados correctamente.");
+            Alert.alert(
+              "Sincronizado",
+              "Permisos de editor recuperados correctamente."
+            );
           } else if (result.status === "OWNER") {
-             // Opcional: Toast o mensaje de éxito sutil
+            // Opcional: Toast o mensaje de éxito sutil
           }
 
           await loadSensorsFromDB();
@@ -291,7 +354,6 @@ export default function HomeScreen() {
           const route = item.type === "N01" ? "gateway" : "sensor";
           router.push(`/${route}/${cleanId}/dashboard`);
         }, 200);
-
       } catch (e) {
         console.error(e);
         setOnboardingStatus(null);
