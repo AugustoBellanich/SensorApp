@@ -24,7 +24,8 @@ export default ({ config }) => {
         foregroundImage: "./assets/images/icon.png",
         backgroundColor: "#ffffff"
       },
-      package: isTest ? "com.bellanich.agrosense.test" : "com.inta.sensorapp",
+      package: isTest ? "com.bellanich.sensor.test" : "com.inta.sensorapp",
+      versionCode: 1,
       edgeToEdgeEnabled: true,
       predictiveBackGestureEnabled: false,
       
