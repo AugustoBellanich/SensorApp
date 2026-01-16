@@ -36,7 +36,6 @@ import { ElectrodeEntity, LinearSegment, SensorEntity } from "../../../database/
 
 // Utils
 import { calculateMoistureFromSegments } from "../../../utils/calibration";
-// Importamos funciones optimizadas
 import { calculateMedian, downsampleData, fillTimeGaps, formatChartData, formatForExcel } from "../../../utils/dataProcessing";
 import { getAgronomicLines } from "../../../utils/referenceLines";
 
@@ -48,6 +47,15 @@ const CLIMATE_LINES = [
   { value: 7.2, label: 'Hora Frío', color: '#1E88E5' }, 
   { value: 35, label: 'Calor Ext.', color: '#FF7043' }  
 ];
+
+// HELPER: Calcular densidad de etiquetas (Zoom inteligente)
+const getLabelStep = (currentSpacing: number) => {
+    if (currentSpacing < 10) return 10;
+    if (currentSpacing < 20) return 6;
+    if (currentSpacing < 35) return 3;
+    if (currentSpacing < 50) return 2;
+    return 1; 
+};
 
 export default function LocalDataScreen() {
   const { id } = useLocalSearchParams();
@@ -72,10 +80,10 @@ export default function LocalDataScreen() {
   const [unit, setUnit] = useState<UnitType>("% Hv");
   const [spacing, setSpacing] = useState<number>(40);
 
-  // Nuevo estado para configuración dinámica del gráfico
+  // Configuración dinámica del gráfico
   const [chartSettings, setChartSettings] = useState({ 
       intervalMs: 3600000, 
-      labelFormat: 'hour' // 'hour' | 'day-hour' | 'day' | 'date'
+      labelFormat: 'hour'
   });
 
   const [electrodesInfo, setElectrodesInfo] = useState<Record<number, ElectrodeEntity>>({});
@@ -121,43 +129,39 @@ export default function LocalDataScreen() {
     loadConfig();
   }, [sensorId]);
 
-  // --- LÓGICA DE OPTIMIZACIÓN DE DATOS (Igual que en SD) ---
-  const optimizeChartSettings = (rawData: any[]) => {
-      if (!rawData || rawData.length === 0) {
-          return { intervalMs: 3600000, labelFormat: 'hour' };
-      }
-
-      // Convertimos timestamps de string ISO a number si es necesario
-      const timestamps = rawData.map(d => new Date(d.timestamp).getTime());
-      const minTs = Math.min(...timestamps);
-      const maxTs = Math.max(...timestamps);
+  // --- LÓGICA DE OPTIMIZACIÓN HD (Idéntica a SD/Cloud) ---
+  const optimizeChartSettings = (rawData: any[], startDate: Date, endDate: Date) => {
+      // Usamos el rango seleccionado por el usuario para calcular la escala
+      const minTs = startDate.getTime();
+      const maxTs = endDate.getTime();
       const totalDurationMs = maxTs - minTs;
+      const diffHours = totalDurationMs / (1000 * 60 * 60);
 
-      // Objetivo: ~70 puntos en pantalla
-      const TARGET_POINTS = 70; 
-      let calculatedInterval = totalDurationMs / TARGET_POINTS;
-
-      const MIN_15 = 15 * 60 * 1000;
+      // Definimos constantes de tiempo
+      const MIN_10 = 10 * 60 * 1000;
+      const MIN_30 = 30 * 60 * 1000;
       const HOUR_1 = 60 * 60 * 1000;
       const HOUR_4 = 4 * HOUR_1;
+      const HOUR_8 = 8 * HOUR_1;
       const HOUR_12 = 12 * HOUR_1;
       const DAY_1 = 24 * HOUR_1;
 
       let finalInterval = HOUR_1; 
       let labelFmt = 'hour';
 
-      if (calculatedInterval <= MIN_15) {
-          finalInterval = MIN_15; 
-          labelFmt = 'hour';
-      } else if (calculatedInterval <= HOUR_1) {
-          finalInterval = HOUR_1; 
-          labelFmt = 'hour';
-      } else if (calculatedInterval <= HOUR_4) {
+      // LÓGICA DE UMBRALES HD
+      if (diffHours <= 24) {
+          finalInterval = MIN_10; 
+          labelFmt = 'hour'; 
+      } else if (diffHours <= 72) { 
+          finalInterval = MIN_30;
+          labelFmt = 'day-hour'; 
+      } else if (diffHours <= 360) { // Hasta 15 días
           finalInterval = HOUR_4; 
           labelFmt = 'day-hour'; 
-      } else if (calculatedInterval <= HOUR_12) {
-          finalInterval = HOUR_12; 
-          labelFmt = 'day'; 
+      } else if (diffHours <= 720) { // Hasta 30 días
+          finalInterval = HOUR_8; 
+          labelFmt = 'day-hour'; // Mostramos hora para 3 puntos diarios
       } else {
           finalInterval = DAY_1; 
           labelFmt = 'date'; 
@@ -165,7 +169,6 @@ export default function LocalDataScreen() {
 
       return { intervalMs: finalInterval, labelFormat: labelFmt };
   };
-
 
   const calcStats = useCallback((arr: any[]) => {
     if (!arr.length) return { min: 0, max: 0, avg: 0 };
@@ -175,8 +178,8 @@ export default function LocalDataScreen() {
 
   // --- PROCESAMIENTO B01 ---
   const processB01 = useCallback((data: any[]) => {
-      // 1. Calcular configuración óptima
-      const settings = optimizeChartSettings(data);
+      // 1. Calcular configuración óptima basada en FECHAS (no solo datos)
+      const settings = optimizeChartSettings(data, dateStart, dateEnd);
       setChartSettings(settings);
       const { intervalMs, labelFormat } = settings;
 
@@ -195,12 +198,14 @@ export default function LocalDataScreen() {
         return { ...d, v1, v2, v3 };
       });
 
-      // Grilla temporal
-      const timestamps = processed.map(d => new Date(d.timestamp).getTime());
-      const minTs = Math.min(...timestamps);
-      const maxTs = Math.max(...timestamps);
-      const startDate = new Date(Math.floor(minTs / intervalMs) * intervalMs);
-      const endDate = new Date(Math.ceil(maxTs / intervalMs) * intervalMs);
+      // Grilla temporal (Alineada al intervalo para fillTimeGaps)
+      const startMs = dateStart.getTime();
+      const endMs = dateEnd.getTime();
+      const startDate = new Date(Math.floor(startMs / intervalMs) * intervalMs);
+      const endDate = new Date(Math.ceil(endMs / intervalMs) * intervalMs);
+
+      // Calcular step de etiquetas
+      const labelStep = getLabelStep(spacing);
 
       const prep = (key: string) => {
         let finalData: any[] = [];
@@ -213,12 +218,14 @@ export default function LocalDataScreen() {
           // Reducción dinámica
           const downsampled = downsampleData(validData, key, intervalMs);
           stats = calcStats(downsampled);
+          // Relleno Inteligente (Corta línea final)
           const filled = fillTimeGaps(downsampled, intervalMs, startDate, endDate);
-          finalData = formatChartData(filled, labelFormat);
+          // Formato Visual
+          finalData = formatChartData(filled, labelFormat, labelStep);
         } else {
-          // Modo Real: Muestra todo (cuidado con muchos datos)
+          // Modo Real
           const mapped = validData.map((p) => ({ timestamp: p.timestamp, value: p[key] }));
-          finalData = formatChartData(mapped, 'hour'); // En real asumimos detalle hora
+          finalData = formatChartData(mapped, 'hour', labelStep); 
           stats = calcStats(mapped);
         }
         return { data: finalData, stats };
@@ -226,13 +233,11 @@ export default function LocalDataScreen() {
 
       setElectrodesData({ 1: prep("v1"), 2: prep("v2"), 3: prep("v3") });
       setSoilTempData(prep("soil_temp"));
-    }, [unit, electrodesInfo, electrodeConfig, formatChartData, calcStats, viewMode]);
+    }, [unit, electrodesInfo, electrodeConfig, formatChartData, calcStats, viewMode, dateStart, dateEnd, spacing]);
 
   // --- PROCESAMIENTO C01 ---
   const processC01 = useCallback((data: any[]) => {
-      // 1. Cálculo de Horas Agronómicas (Datos crudos)
-      // Asumimos que los datos en DB vienen cada 15 min aprox o calculamos delta real
-      // Para simplificar y consistencia con SD, usamos 0.25h por registro si es regular
+      // 1. Cálculo de Horas Agronómicas
       const intervalHours = 0.25; 
       let chill = 0, frost = 0, heat = 0;
 
@@ -252,16 +257,18 @@ export default function LocalDataScreen() {
       });
 
       // 2. Configuración Óptima
-      const settings = optimizeChartSettings(data);
+      const settings = optimizeChartSettings(data, dateStart, dateEnd);
       setChartSettings(settings);
       const { intervalMs, labelFormat } = settings;
 
       // Grilla temporal
-      const timestamps = data.map(d => new Date(d.timestamp).getTime());
-      const minTs = Math.min(...timestamps);
-      const maxTs = Math.max(...timestamps);
-      const startDate = new Date(Math.floor(minTs / intervalMs) * intervalMs);
-      const endDate = new Date(Math.ceil(maxTs / intervalMs) * intervalMs);
+      const startMs = dateStart.getTime();
+      const endMs = dateEnd.getTime();
+      const startDate = new Date(Math.floor(startMs / intervalMs) * intervalMs);
+      const endDate = new Date(Math.ceil(endMs / intervalMs) * intervalMs);
+
+      // Label Step
+      const labelStep = getLabelStep(spacing);
 
       const prep = (key: string) => {
         let finalData: any[] = [];
@@ -274,16 +281,16 @@ export default function LocalDataScreen() {
           const downsampled = downsampleData(validData, key, intervalMs);
           stats = calcStats(downsampled);
           const filled = fillTimeGaps(downsampled, intervalMs, startDate, endDate);
-          finalData = formatChartData(filled, labelFormat);
+          finalData = formatChartData(filled, labelFormat, labelStep);
         } else {
           const mapped = validData.map((p) => ({ timestamp: p.timestamp, value: p[key] }));
-          finalData = formatChartData(mapped, 'hour');
+          finalData = formatChartData(mapped, 'hour', labelStep);
           stats = calcStats(mapped);
         }
         return { data: finalData, stats };
       };
       setClimateData({ temp: prep("air_temp"), hum: prep("humidity") });
-    }, [formatChartData, calcStats, viewMode]);
+    }, [formatChartData, calcStats, viewMode, dateStart, dateEnd, spacing]);
 
   const processData = useCallback((data: any[], type: string) => {
       const safeType = type.toUpperCase();
@@ -306,8 +313,9 @@ export default function LocalDataScreen() {
       
       try {
         const tableName = type === 'B01' ? 'readings_b01' : 'readings_c01';
-        const s = start.toISOString();
-        const e = end.toISOString();
+        // Ajustamos fechas para cubrir el día completo
+        const s = new Date(start); s.setHours(0,0,0,0);
+        const e = new Date(end); e.setHours(23,59,59,999);
         
         let results = await db.getAllAsync(
             `SELECT * FROM ${tableName} 
@@ -315,7 +323,7 @@ export default function LocalDataScreen() {
              AND datetime(timestamp) >= datetime(?) 
              AND datetime(timestamp) <= datetime(?)
              ORDER BY timestamp ASC`,
-            [sensorId, s, e]
+            [sensorId, s.toISOString(), e.toISOString()]
         );
 
         if (results.length === 0) {
@@ -351,8 +359,18 @@ export default function LocalDataScreen() {
       handleSearchData(sensorDb, dateStart, dateEnd);
   }, [isConfigLoaded, dateStart, dateEnd, handleSearchData, sensorDb]);
 
+  // --- PROTECCIÓN CONTRA CRASH (Datos Reales Masivos) ---
   useEffect(() => {
     if (localData.length > 0 && sensorDb) {
+        const CRASH_LIMIT = 2000; // Un poco más permisivo en Local pero seguro
+        if (viewMode === 'real' && localData.length > CRASH_LIMIT) {
+            Alert.alert(
+                "Demasiados Datos",
+                `Hay ${localData.length} puntos. Se activó el modo Optimizado para evitar lentitud. Reduce el rango de fechas para ver datos crudos.`
+            );
+            setViewMode('optimized');
+            return;
+        }
         processData(localData, sensorDb.type);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps

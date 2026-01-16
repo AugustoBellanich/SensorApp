@@ -37,6 +37,15 @@ import { SensorEntity } from '../../../database/types';
 import { TimeRange, useSDDownloader } from '../../../hooks/useSDDownloader';
 import { calculateMedian, downsampleData, fillTimeGaps, formatChartData, formatForExcel } from '../../../utils/dataProcessing';
 
+// HELPER: Calcular densidad de etiquetas (Zoom inteligente)
+const getLabelStep = (currentSpacing: number) => {
+    if (currentSpacing < 10) return 10;
+    if (currentSpacing < 20) return 6;
+    if (currentSpacing < 35) return 3;
+    if (currentSpacing < 50) return 2;
+    return 1; 
+};
+
 // =====================================================================
 // COMPONENTE TARJETA EXPORTABLE
 // =====================================================================
@@ -51,7 +60,7 @@ interface ExportableCardProps {
     sensorLocation: string;
     dateRangeLabel: string;
     yAxisMax?: number;
-    spacing?: number;
+    spacing?: number; // Prop opcional, por defecto 40
 }
 
 const ExportableChartCard = ({ 
@@ -131,7 +140,7 @@ const ExportableChartCard = ({
                         type="line" 
                         unit={unit} 
                         color={color} 
-                        spacing={spacing} 
+                        spacing={spacing} // <--- Spacing dinámico pasado aquí
                         yAxisMax={yAxisMax}
                       />
                 </View>
@@ -208,7 +217,7 @@ export default function SDDataClimateScreen() {
       return `${fmt(minDate)} al ${fmt(maxDate)}`;
   };
 
-  // Optimización de Gráfico
+  // --- OPTIMIZACIÓN HD ---
   const optimizeChartData = (rawData: any[]) => {
       if (!rawData || rawData.length === 0) {
           return { intervalMs: 3600000, spacing: 40, labelFormat: 'hour' };
@@ -218,35 +227,37 @@ export default function SDDataClimateScreen() {
       const minTs = Math.min(...timestamps);
       const maxTs = Math.max(...timestamps);
       const totalDurationMs = maxTs - minTs;
+      const diffHours = totalDurationMs / (1000 * 60 * 60);
 
-      const TARGET_POINTS = 70; 
-      let calculatedInterval = totalDurationMs / TARGET_POINTS;
-
-      const MIN_15 = 15 * 60 * 1000;
+      // Constantes de tiempo
+      const MIN_10 = 10 * 60 * 1000;
+      const MIN_30 = 30 * 60 * 1000;
       const HOUR_1 = 60 * 60 * 1000;
       const HOUR_4 = 4 * HOUR_1;
+      const HOUR_8 = 8 * HOUR_1;
       const HOUR_12 = 12 * HOUR_1;
       const DAY_1 = 24 * HOUR_1;
 
-      let finalInterval = HOUR_1; 
+      let finalInterval = HOUR_1;
       let labelFmt = 'hour';
       let spacing = 40;
 
-      if (calculatedInterval <= MIN_15) {
-          finalInterval = MIN_15; 
+      // LÓGICA DE UMBRALES (IGUAL QUE EN NUBE Y SUELO)
+      if (diffHours <= 24) {
+          finalInterval = MIN_10; 
           labelFmt = 'hour';
           spacing = 50; 
-      } else if (calculatedInterval <= HOUR_1) {
-          finalInterval = HOUR_1; 
-          labelFmt = 'hour';
+      } else if (diffHours <= 72) { 
+          finalInterval = MIN_30;
+          labelFmt = 'day-hour';
           spacing = 40;
-      } else if (calculatedInterval <= HOUR_4) {
+      } else if (diffHours <= 360) { // 15 días
           finalInterval = HOUR_4; 
-          labelFmt = 'day-hour'; 
+          labelFmt = 'day-hour';
           spacing = 35;
-      } else if (calculatedInterval <= HOUR_12) {
-          finalInterval = HOUR_12; 
-          labelFmt = 'day'; 
+      } else if (diffHours <= 720) { // 30 días
+          finalInterval = HOUR_8;
+          labelFmt = 'day-hour';
           spacing = 30;
       } else {
           finalInterval = DAY_1; 
@@ -270,7 +281,6 @@ export default function SDDataClimateScreen() {
     if (!sensorDb || rawData.length === 0) return;
     
     // --- 1. CÁLCULO DE HORAS AGRONÓMICAS (Sobre datos crudos) ---
-    // Asumimos intervalo de 15 min (0.25h) para cada registro de SD
     const intervalHours = 0.25; 
     let chill = 0, frost = 0, heat = 0;
 
@@ -292,23 +302,29 @@ export default function SDDataClimateScreen() {
     // --- 2. OPTIMIZACIÓN DE GRÁFICO ---
     const settings = optimizeChartData(rawData);
     setChartSettings(settings);
-    const { intervalMs, labelFormat } = settings;
+    const { intervalMs, labelFormat, spacing } = settings;
 
+    // --- 3. GRILLA Y LABELS ---
     const timestamps = rawData.map(d => d.timestamp);
     const minTs = Math.min(...timestamps);
     const maxTs = Math.max(...timestamps);
+    
+    // Alineación
     const startDate = new Date(Math.floor(minTs / intervalMs) * intervalMs);
     const endDate = new Date(Math.ceil(maxTs / intervalMs) * intervalMs);
 
+    // Step para etiquetas
+    const labelStep = getLabelStep(spacing);
+
     const prepare = (dataKey: string, arr: any[]) => {
-        // Reducción (Mediana)
+        // Reducción
         const downsampled = downsampleData(arr, dataKey, intervalMs);
-        // Stats Visuales
+        // Stats
         const stats = calculateStats(downsampled);
-        // Relleno
+        // Relleno Inteligente (corta línea final)
         const filled = fillTimeGaps(downsampled, intervalMs, startDate, endDate);
-        // Formato
-        const data = formatChartData(filled, labelFormat);
+        // Formato HD
+        const data = formatChartData(filled, labelFormat, labelStep);
 
         return { data, stats };
     };
@@ -456,7 +472,7 @@ export default function SDDataClimateScreen() {
                     </View>
                 </View>
 
-                {/* --- PANEL AGRO (NUEVO) --- */}
+                {/* --- PANEL AGRO --- */}
                 <View style={styles.agroPanel}>
                     <View style={styles.agroItem}>
                         <MaterialCommunityIcons name="snowflake" size={24} color="#1E88E5" />
@@ -488,7 +504,7 @@ export default function SDDataClimateScreen() {
                         sensorName={sensorDb?.alias || ''} 
                         sensorLocation={sensorDb?.location || ''} 
                         dateRangeLabel={getDateRangeLabel()}
-                        spacing={chartSettings.spacing}
+                        spacing={chartSettings.spacing} // <--- Spacing dinámico
                     />
                     <ExportableChartCard 
                         title="Humedad Relativa" 
@@ -500,7 +516,7 @@ export default function SDDataClimateScreen() {
                         sensorName={sensorDb?.alias || ''} 
                         sensorLocation={sensorDb?.location || ''} 
                         dateRangeLabel={getDateRangeLabel()}
-                        spacing={chartSettings.spacing}
+                        spacing={chartSettings.spacing} // <--- Spacing dinámico
                     />
                 </View>
 
@@ -607,7 +623,7 @@ const styles = StyleSheet.create({
   footerValue: { fontSize: 10, color: '#555', fontWeight: 'bold' },
   footerTiny: { fontSize: 8, color: '#aaa', marginTop: 4, textAlign: 'right' },
 
-  // --- ESTILOS PANEL AGRO (COPIADOS DE LOCALDATA) ---
+  // --- ESTILOS PANEL AGRO ---
   agroPanel: { 
       flexDirection: 'row', 
       backgroundColor: '#fff', 
