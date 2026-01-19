@@ -332,14 +332,15 @@ export const syncService = {
                 const { data: readings } = await supabase
                     .from('readings_b01')
                     .select('*')
-                    .eq('device_id', remote.id) 
+                    .eq('sensor_id', remote.id) 
                     .order('timestamp', { ascending: false })
                     .limit(1);
 
                 if (readings && readings.length > 0) {
                     const mappedReadings = readings.map(r => ({
                         ...r,
-                        sensor_id: r.device_id, // <--- MAPEO
+                        device_id: remote.id, 
+                        sensor_id: remote.id,
                         is_synced: 1
                     }));
                     await insertReadingsB01(mappedReadings as ReadingB01[]);
@@ -348,14 +349,15 @@ export const syncService = {
                 const { data: readings } = await supabase
                     .from('readings_c01')
                     .select('*')
-                    .eq('device_id', remote.id)
+                    .eq('sensor_id', remote.id)
                     .order('timestamp', { ascending: false })
                     .limit(1);
 
                 if (readings && readings.length > 0) {
                     const mappedReadings = readings.map(r => ({
                         ...r,
-                        sensor_id: r.device_id, // <--- MAPEO
+                        device_id: remote.id, 
+                        sensor_id: remote.id,
                         is_synced: 1
                     }));
                     await insertReadingsC01(mappedReadings as ReadingC01[]);

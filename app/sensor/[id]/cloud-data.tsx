@@ -199,19 +199,25 @@ export default function CloudDataScreen() {
   // --- PROCESAMIENTO B01 ---
   const processB01 = useCallback(
     (data: any[]) => {
-      // 1. Configuración Óptima basada en el RANGO SELECCIONADO (no solo en los datos)
-      const settings = optimizeChartSettings(data, dateStart, dateEnd);
+      // 1. NORMALIZACIÓN DE FECHAS (Corrección del error de 1 día)
+      // Creamos copias locales para no mutar el estado y forzamos el rango completo
+      const rangeStart = new Date(dateStart);
+      rangeStart.setHours(0, 0, 0, 0);
+
+      const rangeEnd = new Date(dateEnd);
+      rangeEnd.setHours(23, 59, 59, 999);
+
+      // 2. Configuración Óptima usando el rango expandido
+      const settings = optimizeChartSettings(data, rangeStart, rangeEnd);
       setChartSettings(settings);
       const { intervalMs, labelFormat } = settings;
 
-      // 2. Procesamiento de valores (Conversión mV -> Hv)
+      // 3. Procesamiento de valores (Conversión mV -> Hv)
       const processed = data.map((d) => {
         const mv1 = Number(d.e1_mv);
         const mv2 = Number(d.e2_mv);
         const mv3 = Number(d.e3_mv);
-        let v1 = mv1,
-          v2 = mv2,
-          v3 = mv3;
+        let v1 = mv1, v2 = mv2, v3 = mv3;
 
         if (unit !== "mV") {
           const rho1 = electrodesInfo[1]?.density || 1.3;
@@ -234,10 +240,9 @@ export default function CloudDataScreen() {
         return { ...d, v1, v2, v3 };
       });
 
-      // 3. Definición de la Grilla Temporal (Basada en la selección del usuario)
-      // Usamos dateStart/End para que el gráfico empiece y termine exactamente donde pidió el usuario
-      const startMs = dateStart.getTime();
-      const endMs = dateEnd.getTime();
+      // 4. Definición de la Grilla Temporal (Usando las fechas expandidas)
+      const startMs = rangeStart.getTime();
+      const endMs = rangeEnd.getTime();
 
       // Ajustamos al "bucket" más cercano para que las líneas verticales cuadren
       const gridStart = new Date(Math.floor(startMs / intervalMs) * intervalMs);
@@ -258,7 +263,7 @@ export default function CloudDataScreen() {
           const downsampled = downsampleData(validData, key, intervalMs);
           stats = calcStats(downsampled);
 
-          // B. Rellenar huecos usando el inicio y fin SELECCIONADOS
+          // B. Rellenar huecos usando el inicio y fin EXPANDIDOS
           const filled = fillTimeGaps(
             downsampled,
             intervalMs,
@@ -285,7 +290,7 @@ export default function CloudDataScreen() {
       setElectrodesData({ 1: prep("v1"), 2: prep("v2"), 3: prep("v3") });
       setSoilTempData(prep("soil_temp"));
     },
-    // IMPORTANTE: Agregar dateStart y dateEnd a las dependencias
+    // Dependencias
     [
       unit,
       electrodesInfo,
@@ -294,14 +299,21 @@ export default function CloudDataScreen() {
       viewMode,
       dateStart,
       dateEnd,
-      spacing
+      spacing,
     ]
   );
 
   // --- PROCESAMIENTO C01 ---
   const processC01 = useCallback(
     (data: any[]) => {
-      // 1. Horas Agronómicas (Cálculo con datos crudos ordenados)
+      // 1. NORMALIZACIÓN DE FECHAS
+      const rangeStart = new Date(dateStart);
+      rangeStart.setHours(0, 0, 0, 0);
+
+      const rangeEnd = new Date(dateEnd);
+      rangeEnd.setHours(23, 59, 59, 999);
+
+      // Estadísticas Agronómicas (esto usa data cruda, no afecta el bug gráfico pero es correcto usarlo así)
       let chill = 0,
         frost = 0,
         heat = 0;
@@ -332,15 +344,14 @@ export default function CloudDataScreen() {
         heat: Number(heat.toFixed(1)),
       });
 
-      // 2. Gráficos
-      // Configuración basada en la selección del usuario
-      const settings = optimizeChartSettings(data, dateStart, dateEnd);
+      // 2. Gráficos - Configuración Óptima con fechas expandidas
+      const settings = optimizeChartSettings(data, rangeStart, rangeEnd);
       setChartSettings(settings);
       const { intervalMs, labelFormat } = settings;
 
-      // 3. Definición de la Grilla Temporal (Basada en dateStart/dateEnd)
-      const startMs = dateStart.getTime();
-      const endMs = dateEnd.getTime();
+      // 3. Definición de la Grilla Temporal
+      const startMs = rangeStart.getTime();
+      const endMs = rangeEnd.getTime();
 
       const gridStart = new Date(Math.floor(startMs / intervalMs) * intervalMs);
       const gridEnd = new Date(Math.ceil(endMs / intervalMs) * intervalMs);
@@ -351,13 +362,15 @@ export default function CloudDataScreen() {
 
         const validData = data.filter((p) => {
           const v = p[key];
-          return v !== undefined && v !== null && !isNaN(v) && v > -50; // Permitir temp negativa, filtrar errores extremos
+          return (
+            v !== undefined && v !== null && !isNaN(v) && v > -50
+          ); // Permitir temp negativa
         });
 
         if (viewMode === "optimized") {
           const downsampled = downsampleData(validData, key, intervalMs);
           stats = calcStats(downsampled);
-          // Rellenar huecos respetando el rango seleccionado
+          // Rellenar huecos respetando el rango expandido
           const filled = fillTimeGaps(
             downsampled,
             intervalMs,
@@ -378,7 +391,6 @@ export default function CloudDataScreen() {
 
       setClimateData({ temp: prep("air_temp"), hum: prep("humidity") });
     },
-    // IMPORTANTE: Agregar dateStart y dateEnd a las dependencias
     [calcStats, viewMode, dateStart, dateEnd]
   );
 
