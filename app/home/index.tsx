@@ -1,10 +1,10 @@
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { useFocusEffect, useRouter } from "expo-router";
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
-  FlatList,
+  SectionList,
   StyleSheet,
   Text,
   TouchableOpacity,
@@ -15,6 +15,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Colors } from "../../constants/Colors";
 import { useAuth } from "../../context/AuthContext";
 import { useBle } from "../../context/BleContext";
+import { supabase } from "../../lib/supabase";
 
 // --- DB & SYNC ---
 import {
@@ -25,8 +26,6 @@ import {
 } from "../../database/SensorRepository";
 import { SensorEntity } from "../../database/types";
 import { syncService } from "../../services/syncService";
-
-// --- SUPABASE ---
 
 // Variable global para controlar la sincronización por sesión de app
 let isSessionSynced = false;
@@ -40,6 +39,110 @@ interface SensorItem {
   isSaved: boolean;
   type: SensorModelType;
   device?: Device;
+  location: string;
+  cloudStatus: "online" | "warning" | "offline";
+  cloudBattery: number | null;
+}
+
+// ============================================================
+// ESTADO EN LA NUBE
+// ------------------------------------------------------------
+// Mismo criterio que deviceService.ts en sensor-web: online hasta
+// 1.5x el intervalo esperado, warning hasta 4x, offline después.
+// Se consulta Supabase directo (gateway_status / readings_*),
+// NO el campo local last_sync (no refleja actividad real).
+// ============================================================
+
+type CloudStatus = "online" | "warning" | "offline";
+
+interface CloudInfo {
+  status: CloudStatus;
+  battery: number | null;
+}
+
+const OFFLINE_INFO: CloudInfo = { status: "offline", battery: null };
+
+function resolveStatusFromTimestamp(
+  iso: string,
+  expectedIntervalSec: number,
+): CloudStatus {
+  const diffMinutes = (Date.now() - new Date(iso).getTime()) / (1000 * 60);
+  const expectedMinutes = expectedIntervalSec / 60;
+
+  if (diffMinutes <= expectedMinutes * 1.5) return "online";
+  if (diffMinutes <= expectedMinutes * 4) return "warning";
+  return "offline";
+}
+
+async function fetchCloudInfo(sensor: SensorEntity): Promise<CloudInfo> {
+  const cleanId = sensor.id.replace(/^SEN-/i, "").trim();
+
+  if (sensor.type === "N01") {
+    const { data, error } = await supabase
+      .from("gateway_status")
+      .select("last_heartbeat, battery_pct")
+      .eq("device_id", cleanId)
+      .maybeSingle();
+
+    if (error || !data?.last_heartbeat) return OFFLINE_INFO;
+
+    return {
+      status: resolveStatusFromTimestamp(data.last_heartbeat, 5 * 60), // heartbeat cada 5 min
+      battery: data.battery_pct ?? null,
+    };
+  }
+
+  const table = sensor.type === "C01" ? "readings_c01" : "readings_b01";
+
+  const { data, error } = await supabase
+    .from(table)
+    .select("timestamp, battery_pct")
+    .eq("sensor_id", cleanId)
+    .order("timestamp", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error || !data?.timestamp) return OFFLINE_INFO;
+
+  let configIntervalSec = 1800;
+  try {
+    const config = JSON.parse(sensor.config_json || "{}");
+    configIntervalSec = config.loraInterval ?? config.saveInterval ?? 1800;
+  } catch {}
+
+  return {
+    status: resolveStatusFromTimestamp(data.timestamp, configIntervalSec),
+    battery: data.battery_pct ?? null,
+  };
+}
+
+function getCloudStatusColor(status: CloudStatus): string {
+  switch (status) {
+    case "online":
+      return Colors.success;
+    case "warning":
+      return "#f59e0b";
+    default:
+      return "#ef4444";
+  }
+}
+
+function getCloudStatusLabel(status: CloudStatus): string {
+  switch (status) {
+    case "online":
+      return "En línea";
+    case "warning":
+      return "Demorado";
+    default:
+      return "Sin contacto";
+  }
+}
+
+function getBatteryColor(battery: number | null): string {
+  if (battery == null) return "#999";
+  if (battery <= 20) return "#ef4444";
+  if (battery <= 50) return "#f59e0b";
+  return Colors.success;
 }
 
 // --- SUBCOMPONENTE: OVERLAY DE CARGA ---
@@ -81,18 +184,21 @@ export default function HomeScreen() {
   const [savedSensors, setSavedSensors] = useState<SensorEntity[]>([]);
   const [isSyncing, setIsSyncing] = useState(false);
   const [onboardingStatus, setOnboardingStatus] = useState<string | null>(null);
+  const [collapsedFarms, setCollapsedFarms] = useState<Record<string, boolean>>(
+    {},
+  );
+  const [cloudInfoMap, setCloudInfoMap] = useState<Record<string, CloudInfo>>(
+    {},
+  );
 
   // --- ACCIÓN: CERRAR SESIÓN SEGURA ---
   const handleLogout = async () => {
-    // 1. Verificar si hay datos pendientes de subir antes de borrar todo
     let hasPendingData = false;
     try {
       const pendingSensors = await getSensorsPendingSync();
       if (pendingSensors.length > 0) hasPendingData = true;
-      // (Opcional: aquí podrías consultar también tablas de lecturas pendientes si quieres ser muy estricto)
     } catch {}
 
-    // 2. Definir el mensaje según el riesgo
     const title = "Cerrar Sesión";
     let message =
       "¿Estás seguro de que quieres salir?\n\nSe borrarán los datos locales de este dispositivo para proteger tu cuenta.";
@@ -110,20 +216,9 @@ export default function HomeScreen() {
         onPress: async () => {
           try {
             setIsSyncing(true);
-
-            // 1. Navegar al Login
             router.replace("/");
-
-            // 2. Limpiar DB Local (AuthContext)
             await signOut();
-
-            // 3. LA CORRECCIÓN CLAVE:
-            // Decirle al Home que la próxima vez DEBE sincronizar de nuevo
             isSessionSynced = false;
-
-            // Reiniciamos variable global de sesión
-            // (Asegúrate de exportar/importar isSessionSynced si está en otro archivo, o moverla dentro del contexto)
-            // isSessionSynced = false;
           } catch (e) {
             console.error("Error al salir:", e);
             Alert.alert("Error", "No se pudo cerrar la sesión correctamente.");
@@ -148,49 +243,71 @@ export default function HomeScreen() {
   // --- 1. SINCRONIZACIÓN INICIAL ---
   useEffect(() => {
     const initSync = async () => {
-      // 1. Primero cargamos lo que haya en la DB
       const localSensors = await getAllSensors();
       setSavedSensors(localSensors);
 
-      // 2. Si ya sincronizamos en esta sesión, no molestamos más
       if (isSessionSynced) return;
 
-      // 3. DETECCIÓN DE "RESTAURACIÓN" (Login Nuevo)
-      // Si no tengo sensores locales, asumo que acabo de instalar o loguearme
       const needsFullRestore = localSensors.length === 0;
 
       if (needsFullRestore) {
-        setOnboardingStatus("Restaurando tus sensores desde la nube..."); // Mostramos Overlay
+        setOnboardingStatus("Restaurando tus sensores desde la nube...");
       } else {
-        setIsSyncing(true); // Sync silencioso (spinner chico arriba)
+        setIsSyncing(true);
       }
 
       try {
-        // Ejecutamos la sincronización
         await syncService.syncAll();
 
-        // 4. IMPORTANTE: Recargar la DB después de bajar datos
         const updatedSensors = await getAllSensors();
         setSavedSensors(updatedSensors);
 
         isSessionSynced = true;
         console.log(
-          `[Home] Restauración completada. ${updatedSensors.length} sensores recuperados.`
+          `[Home] Restauración completada. ${updatedSensors.length} sensores recuperados.`,
         );
       } catch (e) {
         console.log("Sync warning:", e);
         Alert.alert(
           "Aviso",
-          "No se pudieron recuperar los datos de la nube. Revisa tu conexión."
+          "No se pudieron recuperar los datos de la nube. Revisa tu conexión.",
         );
       } finally {
         setIsSyncing(false);
-        setOnboardingStatus(null); // Ocultamos Overlay
+        setOnboardingStatus(null);
       }
     };
 
     initSync();
   }, []);
+
+  // --- 1.1 ESTADO EN LA NUBE (consulta directa a Supabase) ---
+  useEffect(() => {
+    let active = true;
+
+    const loadCloudInfo = async () => {
+      if (savedSensors.length === 0) return;
+
+      const entries = await Promise.all(
+        savedSensors.map(async (sensor) => {
+          const info = await fetchCloudInfo(sensor);
+          return [sensor.id, info] as const;
+        }),
+      );
+
+      if (active) {
+        setCloudInfoMap(Object.fromEntries(entries));
+      }
+    };
+
+    loadCloudInfo();
+    const interval = setInterval(loadCloudInfo, 30000);
+
+    return () => {
+      active = false;
+      clearInterval(interval);
+    };
+  }, [savedSensors]);
 
   // --- 2. GESTIÓN DEL ESCANEO AL ENTRAR ---
   useFocusEffect(
@@ -198,24 +315,18 @@ export default function HomeScreen() {
       let timeoutId: any;
 
       const onFocus = async () => {
-        // 1. Limpieza UI
         clearScannedDevices();
         setDisplayList([]);
         await loadSensorsFromDB();
 
-        // 2. Lógica de seguridad para iniciar escaneo
-        // Esperamos un poco más para asegurar que el BLE stack esté libre tras la desconexión
         timeoutId = setTimeout(async () => {
-          // Verificar explícitamente que NO estamos conectados ni ocupados
-          // A veces connectedDevice tarda en ser null, verificamos isBusy también
           if (!connectedDevice && !isBusy) {
             console.log("[HOME] Iniciando escaneo seguro...");
             startScan();
           } else {
             console.log("[HOME] BLE Ocupado o Conectado, saltando escaneo.");
-            // Opcional: Podrías forzar un disconnect aquí si detectas un estado inconsistente
           }
-        }, 800); // Aumenté el tiempo de 500 a 800ms para dar aire al Garbage Collector
+        }, 800);
       };
 
       onFocus();
@@ -224,7 +335,7 @@ export default function HomeScreen() {
         clearTimeout(timeoutId);
         stopScan();
       };
-    }, [connectedDevice, isBusy, clearScannedDevices, startScan, stopScan])
+    }, [connectedDevice, isBusy, clearScannedDevices, startScan, stopScan]),
   );
 
   // --- 3. PROCESAMIENTO DE LISTA (BLE + DB) ---
@@ -233,7 +344,7 @@ export default function HomeScreen() {
       const rawName = device.name || device.id;
       const cleanId = rawName.replace(/^SEN-/i, "").trim();
       const known = savedSensors.find(
-        (db) => db.id === cleanId || db.id === rawName
+        (db) => db.id === cleanId || db.id === rawName,
       );
 
       let detectedType: SensorModelType = "UNKNOWN";
@@ -255,6 +366,11 @@ export default function HomeScreen() {
         isSaved: !!known,
         type: detectedType,
         device: device,
+        location: known?.location || "Sin establecimiento asignado",
+        cloudStatus: known
+          ? (cloudInfoMap[known.id]?.status ?? "offline")
+          : "offline",
+        cloudBattery: known ? (cloudInfoMap[known.id]?.battery ?? null) : null,
       };
     });
 
@@ -270,52 +386,63 @@ export default function HomeScreen() {
           rssi: null,
           isSaved: true,
           type: savedSensor.type as SensorModelType,
+          location: savedSensor.location || "Sin establecimiento asignado",
+          cloudStatus: cloudInfoMap[savedSensor.id]?.status ?? "offline",
+          cloudBattery: cloudInfoMap[savedSensor.id]?.battery ?? null,
         });
       }
     });
 
     combined.sort((a, b) => (b.rssi ?? -999) - (a.rssi ?? -999));
     setDisplayList(combined);
-  }, [scannedDevices, savedSensors]);
+  }, [scannedDevices, savedSensors, cloudInfoMap]);
 
-  // --- 4. ACCIÓN: CONECTAR O ENTRAR A DASHBOARD (CON VALIDACIÓN DE FORMATO Y ROLES) ---
+  // --- 3.1 AGRUPACIÓN POR ESTABLECIMIENTO ---
+  const groupedList = useMemo(() => {
+    const groups: Record<string, SensorItem[]> = {};
+    displayList.forEach((item) => {
+      const farm = item.location || "Sin establecimiento asignado";
+      if (!groups[farm]) groups[farm] = [];
+      groups[farm].push(item);
+    });
+    return Object.entries(groups).map(([title, data]) => ({ title, data }));
+  }, [displayList]);
+
+  const toggleFarm = (farm: string) => {
+    setCollapsedFarms((prev) => ({ ...prev, [farm]: !prev[farm] }));
+  };
+
+  // --- 4. ACCIÓN: CONECTAR O ENTRAR A DASHBOARD ---
   const handleConnectAction = async (item: SensorItem) => {
     if (isBusy || isSyncing) return;
 
     if (item.device) {
       try {
-        // 1. LIMPIEZA Y NORMALIZACIÓN DEL ID
         const rawId = item.device.name || item.id;
         const cleanId = rawId.replace(/^SEN-/i, "").trim().toUpperCase();
 
-        // ---------------------------------------------------------
-        // 2. VALIDACIÓN DE FORMATO (NUEVO)
-        // ---------------------------------------------------------
         const idRegex = /^[A-Z]\d{2}-[A-Z0-9]{6}$/;
 
         if (!idRegex.test(cleanId)) {
           Alert.alert(
             "Dispositivo No Compatible",
-            `"${cleanId}" no es un sensor válido.\n\nDebe cumplir el formato: TIPO-SERIE (Ej: B01-A1B2C3).`
+            `"${cleanId}" no es un sensor válido.\n\nDebe cumplir el formato: TIPO-SERIE (Ej: B01-A1B2C3).`,
           );
-          return; // ⛔ DETENEMOS TODO AQUÍ
+          return;
         }
 
         setOnboardingStatus("Conectando...");
         await connectToDevice(item.device);
 
-        // Verificamos si ya lo tenemos guardado localmente
         const existingLocal = await getSensorById(cleanId);
 
         if (!existingLocal) {
           setOnboardingStatus("Vinculando...");
 
-          // Detectamos tipo (B01, C01, N01)
           let validatedType: "B01" | "C01" | "N01" = "B01";
           if (cleanId.startsWith("C01")) validatedType = "C01";
           else if (cleanId.startsWith("N01")) validatedType = "N01";
 
-          // USAMOS LA NUEVA FUNCIÓN DEL REPO
           const result = await linkNewSensor({
             id: cleanId,
             alias: item.name,
@@ -329,18 +456,15 @@ export default function HomeScreen() {
 
           console.log(`[Home] Resultado vinculación: ${result.status}`);
 
-          // ---------------------------------------------------------
-          // 3. FEEDBACK SEGÚN EL ROL OBTENIDO
-          // ---------------------------------------------------------
           if (result.status === "LOCAL_ONLY") {
             Alert.alert(
               "Modo Visor Local",
-              "Este sensor pertenece a otro usuario. Podrás ver datos en vivo por Bluetooth, pero no se guardarán en la nube."
+              "Este sensor pertenece a otro usuario. Podrás ver datos en vivo por Bluetooth, pero no se guardarán en la nube.",
             );
           } else if (result.status === "EDITOR_CONFIRMED") {
             Alert.alert(
               "Sincronizado",
-              "Permisos de editor recuperados correctamente."
+              "Permisos de editor recuperados correctamente.",
             );
           } else if (result.status === "OWNER") {
             // Opcional: Toast o mensaje de éxito sutil
@@ -426,9 +550,31 @@ export default function HomeScreen() {
           <Text style={styles.subId}>{item.id}</Text>
           <View style={styles.signalRow}>
             {isOffline ? (
-              <Text style={styles.offlineText}>Offline</Text>
+              <Text style={styles.offlineText}>Offline (BLE)</Text>
             ) : (
               <Text style={styles.rssiText}>{item.rssi} dBm</Text>
+            )}
+
+            <View
+              style={[
+                styles.cloudDot,
+                { backgroundColor: getCloudStatusColor(item.cloudStatus) },
+              ]}
+            />
+            <Text style={styles.cloudStatusText}>
+              {getCloudStatusLabel(item.cloudStatus)}
+            </Text>
+
+            {item.cloudBattery != null && (
+              <Text
+                style={[
+                  styles.cloudBatteryText,
+                  { color: getBatteryColor(item.cloudBattery) },
+                ]}
+              >
+                {" "}
+                · {item.cloudBattery}%
+              </Text>
             )}
           </View>
         </View>
@@ -467,11 +613,39 @@ export default function HomeScreen() {
         </View>
       </View>
 
-      <FlatList
-        data={displayList}
+      <SectionList
+        sections={groupedList}
         keyExtractor={(item) => item.id}
-        renderItem={renderItem}
-        contentContainerStyle={{ padding: 16 }}
+        renderSectionHeader={({ section }) => (
+          <TouchableOpacity
+            style={styles.farmHeader}
+            onPress={() => toggleFarm(section.title)}
+          >
+            <MaterialCommunityIcons
+              name="office-building-outline"
+              size={16}
+              color="#555"
+            />
+            <Text style={styles.farmHeaderText}>
+              {section.title} ({section.data.length})
+            </Text>
+            <MaterialCommunityIcons
+              name={
+                collapsedFarms[section.title] ? "chevron-right" : "chevron-down"
+              }
+              size={18}
+              color="#999"
+            />
+          </TouchableOpacity>
+        )}
+        renderItem={({ item, section }) =>
+          collapsedFarms[section.title] ? null : renderItem({ item })
+        }
+        contentContainerStyle={{
+          padding: 16,
+          paddingBottom: insets.bottom + 40,
+        }}
+        stickySectionHeadersEnabled={false}
       />
       <LoadingOverlay
         visible={isBusy || isSyncing || !!onboardingStatus}
@@ -507,6 +681,20 @@ const styles = StyleSheet.create({
     alignItems: "center",
   },
   scanningBtn: { backgroundColor: "#999" },
+  farmHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    paddingVertical: 10,
+    paddingHorizontal: 4,
+  },
+  farmHeaderText: {
+    flex: 1,
+    fontSize: 13,
+    fontWeight: "bold",
+    color: "#555",
+    textTransform: "uppercase",
+  },
   card: {
     flexDirection: "row",
     alignItems: "center",
@@ -531,6 +719,21 @@ const styles = StyleSheet.create({
   signalRow: { flexDirection: "row", alignItems: "center", marginTop: 4 },
   rssiText: { fontSize: 12, fontWeight: "bold", color: Colors.success },
   offlineText: { fontSize: 12, color: "#999", fontStyle: "italic" },
+  cloudDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 4,
+    marginLeft: 10,
+  },
+  cloudStatusText: {
+    fontSize: 11,
+    color: "#888",
+    marginLeft: 4,
+  },
+  cloudBatteryText: {
+    fontSize: 11,
+    fontWeight: "bold",
+  },
   loadingOverlay: {
     position: "absolute",
     top: 0,
