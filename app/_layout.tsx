@@ -1,13 +1,13 @@
 import { Stack, useRouter, useSegments } from "expo-router";
 import { StatusBar } from "expo-status-bar";
-import React, { useEffect, useState } from 'react';
-import { ActivityIndicator, Text, View } from 'react-native';
+import React, { useEffect, useState } from "react";
+import { ActivityIndicator, Text, View } from "react-native";
 
 // Servicios
-import { AuthProvider, useAuth } from '../context/AuthContext';
-import { BleProvider } from '../context/BleContext';
-import { initDatabase } from '../database/DatabaseInit';
-import { debugDatabase } from '../utils/DatabaseDebug'; // Importar
+import { AuthProvider, useAuth } from "../context/AuthContext";
+import { BleProvider } from "../context/BleContext";
+import { initDatabase } from "../database/DatabaseInit";
+import { debugDatabase } from "../utils/DatabaseDebug"; // Importar
 
 function RootNavigation() {
   const { session, isLoading: isAuthLoading } = useAuth();
@@ -18,22 +18,26 @@ function RootNavigation() {
     if (isAuthLoading) return;
 
     const currentRoute = segments[0] as string | undefined;
-    const isTryingToAccessProtected = 
-        currentRoute === 'home' || 
-        currentRoute === 'sensor' || 
-        currentRoute === 'gateway';
+    const isTryingToAccessProtected =
+      currentRoute === "home" ||
+      currentRoute === "sensor" ||
+      currentRoute === "gateway";
 
     if (!session && isTryingToAccessProtected) {
-       router.replace('/'); 
-    } 
-    else if (session && (currentRoute === undefined || currentRoute === 'index')) {
-       router.replace('/home'); 
+      router.replace("/");
+    } else if (
+      session &&
+      (currentRoute === undefined ||
+        currentRoute === "index" ||
+        currentRoute === "forgot-password")
+    ) {
+      router.replace("/home");
     }
   }, [session, segments, isAuthLoading, router]);
 
   if (isAuthLoading) {
     return (
-      <View style={{flex:1, justifyContent:'center', alignItems:'center'}}>
+      <View style={{ flex: 1, justifyContent: "center", alignItems: "center" }}>
         <ActivityIndicator size="large" />
       </View>
     );
@@ -41,8 +45,12 @@ function RootNavigation() {
 
   return (
     <Stack screenOptions={{ headerShown: false }}>
-      <Stack.Screen name="index" /> 
-      <Stack.Screen name="home/index" /> 
+      <Stack.Screen name="index" />
+      <Stack.Screen
+        name="forgot-password"
+        options={{ presentation: "modal" }}
+      />
+      <Stack.Screen name="home/index" />
       {/* Las rutas dinámicas se manejan mejor sin declararlas aquí explícitamente 
           si ya tienen sus propios _layout dentro de las carpetas, 
           pero para evitar errores las dejamos genéricas */}
@@ -69,9 +77,9 @@ export default function RootLayout() {
 
   if (!isDbReady) {
     return (
-      <View style={{flex:1, justifyContent:'center', alignItems:'center'}}>
-        <ActivityIndicator size="large" color="#000"/>
-        <Text style={{marginTop:10}}>Iniciando Sistema...</Text>
+      <View style={{ flex: 1, justifyContent: "center", alignItems: "center" }}>
+        <ActivityIndicator size="large" color="#000" />
+        <Text style={{ marginTop: 10 }}>Iniciando Sistema...</Text>
       </View>
     );
   }
@@ -79,9 +87,9 @@ export default function RootLayout() {
   return (
     <>
       <StatusBar style="dark" />
-      <AuthProvider> 
+      <AuthProvider>
         <BleProvider>
-           <RootNavigation />
+          <RootNavigation />
         </BleProvider>
       </AuthProvider>
     </>

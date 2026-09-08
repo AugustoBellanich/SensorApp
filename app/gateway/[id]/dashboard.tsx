@@ -12,6 +12,7 @@ import {
   View,
 } from "react-native";
 
+import GatewayMultiLineChart from "../../../components/sensor/GatewayMultiLineChart";
 import SensorInfoBar from "../../../components/sensor/SensorInfoBar";
 import { BLE_UUIDS } from "../../../constants/BleUUIDs";
 import { Colors } from "../../../constants/Colors";
@@ -21,11 +22,13 @@ import {
   unlinkSensor,
 } from "../../../database/SensorRepository";
 import { SensorEntity } from "../../../database/types";
+import { ingestService } from "../../../services/ingestService";
 import {
   getBatteryColor,
   getBatteryIcon,
   getBatteryPercentage,
 } from "../../../utils/batteryUtils";
+import type { IngestLog } from "../../../utils/types";
 
 // --- SUPABASE ---
 import { supabase } from "../../../lib/supabase";
@@ -69,6 +72,19 @@ const formatDateAR = (isoStringOrTimestamp: string | number) => {
     .replace(",", "");
 };
 
+// Ventana fija de 24hs para el historial de ingesta (rolling: siempre
+// "las últimas 24 horas desde ahora", se recalcula en cada refresco).
+const INGEST_WINDOW_MS = 24 * 60 * 60 * 1000;
+const INGEST_REFRESH_MS = 30000;
+
+// Agrupamiento de los gráficos: baldes de 3hs (8 puntos en 24hs) en vez de
+// 1hs (24 puntos). Con 24 puntos en un ancho fijo sin scroll, cada etiqueta
+// queda con ~11px de espacio real y se corta ("0..."); con 8 puntos cada
+// etiqueta tiene ~35-40px, suficiente para mostrarse completa en cualquier
+// resolución.
+const BUCKET_HOURS = 3;
+const BUCKET_COUNT = 24 / BUCKET_HOURS; // 8 baldes
+
 export default function GatewayDashboard() {
   const { id } = useLocalSearchParams();
   const router = useRouter();
@@ -91,6 +107,11 @@ export default function GatewayDashboard() {
   const canEdit = userRole === "owner" || userRole === "editor";
 
   const [isDeleting, setIsDeleting] = useState(false);
+
+  // --- HISTORIAL DE INGESTA (Supabase, independiente del BLE) ---
+  const [ingestLogs, setIngestLogs] = useState<IngestLog[]>([]);
+  const [ingestLoading, setIngestLoading] = useState(true);
+  const [ingestError, setIngestError] = useState<string | null>(null);
 
   // 1. Cargar datos de DB Local
   useEffect(() => {
@@ -143,6 +164,44 @@ export default function GatewayDashboard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // 4. Historial de ingesta — últimas 24hs, con auto-refresco cada 30s.
+  // No depende de "isConnected" (BLE): esto viaja por Supabase, así que
+  // funciona aunque el celular no esté cerca del Gateway físicamente.
+  useEffect(() => {
+    if (!sensorIdStr) return;
+    let cancelled = false;
+
+    const loadIngestLogs = async () => {
+      try {
+        setIngestError(null);
+        const to = new Date();
+        const from = new Date(to.getTime() - INGEST_WINDOW_MS);
+        const data = await ingestService.getLogs(
+          sensorIdStr,
+          from.toISOString(),
+          to.toISOString(),
+        );
+        if (!cancelled) setIngestLogs(data);
+      } catch (err: any) {
+        console.error("Error cargando historial de ingesta:", err);
+        if (!cancelled) {
+          setIngestError(err?.message || "No se pudo cargar el historial.");
+        }
+      } finally {
+        if (!cancelled) setIngestLoading(false);
+      }
+    };
+
+    setIngestLoading(true);
+    loadIngestLogs();
+    const interval = setInterval(loadIngestLogs, INGEST_REFRESH_MS);
+
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [sensorIdStr]);
+
   // Estados específicos del Gateway
   const wifiStatus = diagnosisStatus.wifiStatus || "UNKNOWN";
   const isWifiOnline = wifiStatus === "ONLINE";
@@ -163,6 +222,111 @@ export default function GatewayDashboard() {
       return [];
     }
   }, [diagnosisStatus.sensorsList]);
+
+  // --- ESTADÍSTICAS DEL HISTORIAL DE INGESTA ---
+  const ingestStats = useMemo(() => {
+    const total = ingestLogs.length;
+    const success = ingestLogs.filter(
+      (l) => l.request_status === "success",
+    ).length;
+    const failed = ingestLogs.filter(
+      (l) => l.request_status === "error",
+    ).length;
+    // ingestLogs viene ordenado ASCENDENTE (más viejo -> más nuevo),
+    // así que el más reciente es el ÚLTIMO elemento, no el primero.
+    const last =
+      ingestLogs.length > 0 ? ingestLogs[ingestLogs.length - 1] : null;
+    return { total, success, failed, last };
+  }, [ingestLogs]);
+
+  // --- DATOS PARA LOS GRÁFICOS: baldes de 3 horas ---
+  const hourlyBuckets = useMemo(() => {
+    const now = new Date();
+    const bucketMs = BUCKET_HOURS * 60 * 60 * 1000;
+
+    const buckets = Array.from({ length: BUCKET_COUNT }, (_, i) => {
+      const bucketsAgo = BUCKET_COUNT - 1 - i;
+      const bucketTime = new Date(now.getTime() - bucketsAgo * bucketMs);
+      return {
+        label: `${String(bucketTime.getHours()).padStart(2, "0")}h`,
+        recibidas: 0,
+        insertadas: 0,
+        duplicadas: 0,
+        demoraSum: 0,
+        demoraCount: 0,
+        procSum: 0,
+        procCount: 0,
+      };
+    });
+
+    ingestLogs.forEach((log) => {
+      const logTime = new Date(log.received_at).getTime();
+      const bucketsAgo = Math.floor((now.getTime() - logTime) / bucketMs);
+      const idx = BUCKET_COUNT - 1 - bucketsAgo;
+      if (idx < 0 || idx >= BUCKET_COUNT) return;
+
+      buckets[idx].recibidas += log.readings_received ?? 0;
+      buckets[idx].insertadas += log.readings_inserted ?? 0;
+      buckets[idx].duplicadas += log.readings_duplicate ?? 0;
+
+      if (typeof log.upload_delay_seconds === "number") {
+        buckets[idx].demoraSum += log.upload_delay_seconds;
+        buckets[idx].demoraCount += 1;
+      }
+      if (typeof log.processing_ms === "number") {
+        buckets[idx].procSum += log.processing_ms;
+        buckets[idx].procCount += 1;
+      }
+    });
+
+    return buckets.map((b) => ({
+      label: b.label,
+      recibidas: b.recibidas,
+      insertadas: b.insertadas,
+      duplicadas: b.duplicadas,
+      demora: b.demoraCount > 0 ? Math.round(b.demoraSum / b.demoraCount) : 0,
+      procesamiento: b.procCount > 0 ? Math.round(b.procSum / b.procCount) : 0,
+    }));
+  }, [ingestLogs]);
+
+  const bucketLabels = useMemo(
+    () => hourlyBuckets.map((b) => b.label),
+    [hourlyBuckets],
+  );
+
+  const hasIngestData = !ingestLoading && !ingestError && ingestLogs.length > 0;
+
+  // Demora y Procesamiento no se grafican como línea de tiempo — son
+  // valores que varían poco y un promedio simple dice más de un vistazo
+  // que una curva. Se muestran como stats, no como gráfico.
+  const perfStats = useMemo(() => {
+    const withDemora = ingestLogs.filter(
+      (l) => typeof l.upload_delay_seconds === "number",
+    );
+    const withProc = ingestLogs.filter(
+      (l) => typeof l.processing_ms === "number",
+    );
+
+    const avgDemora =
+      withDemora.length > 0
+        ? Math.round(
+            withDemora.reduce(
+              (sum, l) => sum + (l.upload_delay_seconds as number),
+              0,
+            ) / withDemora.length,
+          )
+        : null;
+
+    const avgProc =
+      withProc.length > 0
+        ? Math.round(
+            withProc.reduce((sum, l) => sum + (l.processing_ms as number), 0) /
+              withProc.length,
+          )
+        : null;
+
+    return { avgDemora, avgProc };
+  }, [ingestLogs]);
 
   // Acción rápida: Forzar Subida
   const handleForceSync = async () => {
@@ -392,7 +556,7 @@ export default function GatewayDashboard() {
         style={styles.content}
         contentContainerStyle={{ padding: 16 }}
       >
-        {/* 1. ESTADO DE RED */}
+        {/* 1. ESTADO DE RED (solo WiFi en vivo por BLE) */}
         <View style={styles.sectionCard}>
           <Text style={styles.sectionTitle}>Estado de Conectividad</Text>
 
@@ -415,36 +579,9 @@ export default function GatewayDashboard() {
               <Text style={styles.statusValue}>{wifiStatus}</Text>
             </View>
           </View>
-
-          <View style={[styles.divider]} />
-
-          <View style={styles.statusRow}>
-            <View style={styles.statusIcon}>
-              <MaterialCommunityIcons
-                name="cloud-upload"
-                size={24}
-                color={
-                  diagnosisStatus.syncStatus === "SENDING"
-                    ? Colors.primary
-                    : Colors.textSecondary
-                }
-              />
-            </View>
-            <View style={{ flex: 1 }}>
-              <Text style={styles.statusLabel}>Sincronización Nube</Text>
-              <Text style={styles.statusValue}>
-                {diagnosisStatus.syncStatus === "SENDING"
-                  ? "Subiendo datos..."
-                  : diagnosisStatus.syncStatus || "IDLE"}
-              </Text>
-              <Text style={styles.lastSync}>
-                Última: {formatDateAR(diagnosisStatus.lastSync ?? "")}
-              </Text>
-            </View>
-          </View>
         </View>
 
-        {/* ESTADO EN LA NUBE (heartbeat, no depende del BLE) */}
+        {/* 2. ESTADO EN LA NUBE (heartbeat, no depende del BLE) */}
         <View style={styles.sectionCard}>
           <View
             style={{
@@ -534,7 +671,182 @@ export default function GatewayDashboard() {
           )}
         </View>
 
-        {/* 2. ACCIONES DE CONTROL */}
+        {/* 3. HISTORIAL DE INGESTA (últimas 24hs, vía Supabase — no requiere BLE) */}
+        <Text style={styles.sectionHeader}>Historial de Subidas (24 hs)</Text>
+        <View style={styles.sectionCard}>
+          {ingestLoading ? (
+            <View style={{ paddingVertical: 24, alignItems: "center" }}>
+              <ActivityIndicator color={Colors.primary} />
+              <Text
+                style={{
+                  marginTop: 8,
+                  color: Colors.textSecondary,
+                  fontSize: 13,
+                }}
+              >
+                Cargando historial...
+              </Text>
+            </View>
+          ) : ingestError ? (
+            <View style={{ alignItems: "center", paddingVertical: 10 }}>
+              <MaterialCommunityIcons
+                name="alert-circle-outline"
+                size={28}
+                color={Colors.error}
+              />
+              <Text
+                style={{
+                  color: Colors.error,
+                  fontWeight: "bold",
+                  marginTop: 6,
+                }}
+              >
+                No se pudo cargar el historial
+              </Text>
+              <Text
+                style={{
+                  color: Colors.textSecondary,
+                  fontSize: 12,
+                  marginTop: 2,
+                  textAlign: "center",
+                }}
+              >
+                {ingestError}
+              </Text>
+            </View>
+          ) : ingestLogs.length === 0 ? (
+            <Text
+              style={{
+                color: "#999",
+                fontStyle: "italic",
+                textAlign: "center",
+                paddingVertical: 10,
+              }}
+            >
+              Sin comunicaciones registradas en las últimas 24hs.
+            </Text>
+          ) : (
+            <>
+              <View style={styles.ingestStatsRow}>
+                <View style={styles.ingestStatItem}>
+                  <Text style={styles.ingestStatLabel}>REQUESTS</Text>
+                  <Text style={styles.ingestStatValue}>
+                    {ingestStats.total}
+                  </Text>
+                </View>
+                <View style={[styles.ingestStatItem, styles.ingestStatBorder]}>
+                  <Text style={styles.ingestStatLabel}>EXITOSOS</Text>
+                  <Text
+                    style={[styles.ingestStatValue, { color: Colors.success }]}
+                  >
+                    {ingestStats.success}
+                  </Text>
+                </View>
+                <View style={styles.ingestStatItem}>
+                  <Text style={styles.ingestStatLabel}>ERRORES</Text>
+                  <Text
+                    style={[
+                      styles.ingestStatValue,
+                      {
+                        color:
+                          ingestStats.failed > 0
+                            ? Colors.error
+                            : Colors.textPrimary,
+                      },
+                    ]}
+                  >
+                    {ingestStats.failed}
+                  </Text>
+                </View>
+              </View>
+
+              {ingestStats.last && (
+                <Text style={styles.lastSync}>
+                  Última comunicación:{" "}
+                  {formatDateAR(ingestStats.last.received_at)}
+                  {"  "}
+                  <Text
+                    style={{
+                      fontWeight: "bold",
+                      color:
+                        ingestStats.last.request_status === "success"
+                          ? Colors.success
+                          : Colors.error,
+                    }}
+                  >
+                    {ingestStats.last.request_status === "success"
+                      ? "OK"
+                      : "ERROR"}
+                  </Text>
+                </Text>
+              )}
+
+              {ingestStats.last?.error_message ? (
+                <Text style={styles.ingestErrorDetail}>
+                  {ingestStats.last.error_message}
+                </Text>
+              ) : null}
+            </>
+          )}
+        </View>
+
+        {hasIngestData && (
+          <>
+            <Text style={styles.sectionHeader}>
+              Actividad de Ingesta (cada 3 hs)
+            </Text>
+            <GatewayMultiLineChart
+              title="Lecturas por balde de 3hs"
+              unit="cantidad"
+              labels={bucketLabels}
+              series={[
+                {
+                  label: "Recibidas",
+                  color: Colors.primary,
+                  values: hourlyBuckets.map((b) => b.recibidas),
+                },
+                {
+                  label: "Insertadas",
+                  color: Colors.success,
+                  values: hourlyBuckets.map((b) => b.insertadas),
+                },
+                {
+                  label: "Duplicadas",
+                  color: Colors.warning,
+                  values: hourlyBuckets.map((b) => b.duplicadas),
+                },
+              ]}
+            />
+
+            <Text style={styles.sectionHeader}>
+              Rendimiento del Gateway (24 hs)
+            </Text>
+            <View style={styles.sectionCard}>
+              <View style={styles.ingestStatsRow}>
+                <View style={styles.ingestStatItem}>
+                  <Text style={styles.ingestStatLabel}>DEMORA PROM.</Text>
+                  <Text style={styles.ingestStatValue}>
+                    {perfStats.avgDemora !== null
+                      ? `${perfStats.avgDemora}s`
+                      : "--"}
+                  </Text>
+                </View>
+                <View style={[styles.ingestStatItem, styles.ingestStatBorder]}>
+                  <Text style={styles.ingestStatLabel}>
+                    PROCESAMIENTO PROM.
+                  </Text>
+                  <Text style={styles.ingestStatValue}>
+                    {perfStats.avgProc !== null
+                      ? `${perfStats.avgProc}ms`
+                      : "--"}
+                  </Text>
+                </View>
+              </View>
+            </View>
+          </>
+        )}
+
+        {/* 4. ACCIONES DE CONTROL */}
         <Text style={styles.sectionHeader}>Controles</Text>
         <View style={styles.grid}>
           <TouchableOpacity
@@ -607,7 +919,7 @@ export default function GatewayDashboard() {
           )}
         </TouchableOpacity>
 
-        {/* 3. SENSORES LORA DETECTADOS */}
+        {/* 5. SENSORES LORA DETECTADOS */}
         <Text style={styles.sectionHeader}>Sensores en Campo (LoRa)</Text>
 
         {loraSensors.length === 0 ? (
@@ -794,6 +1106,27 @@ const styles = StyleSheet.create({
   statusValue: { fontSize: 16, fontWeight: "bold", color: Colors.textPrimary },
   lastSync: { fontSize: 13, color: "#666", marginTop: 2, fontWeight: "500" },
   divider: { height: 1, backgroundColor: "#eee", marginVertical: 15 },
+
+  // --- Historial de ingesta ---
+  ingestStatsRow: { flexDirection: "row", justifyContent: "space-between" },
+  ingestStatItem: { alignItems: "center", flex: 1 },
+  ingestStatBorder: {
+    borderLeftWidth: 1,
+    borderRightWidth: 1,
+    borderColor: "#eee",
+  },
+  ingestStatLabel: {
+    fontSize: 10,
+    color: "#888",
+    fontWeight: "bold",
+    marginBottom: 4,
+  },
+  ingestStatValue: {
+    fontSize: 20,
+    fontWeight: "bold",
+    color: Colors.textPrimary,
+  },
+  ingestErrorDetail: { fontSize: 12, color: Colors.error, marginTop: 6 },
 
   grid: { flexDirection: "row", gap: 12, marginBottom: 20 },
   actionCard: {

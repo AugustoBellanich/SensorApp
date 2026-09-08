@@ -1,5 +1,5 @@
-import { useRouter } from 'expo-router';
-import React, { useEffect, useState } from 'react';
+import { useRouter } from "expo-router";
+import React, { useEffect, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -11,27 +11,30 @@ import {
   Text,
   TextInput,
   TouchableOpacity,
-  View
-} from 'react-native';
+  View,
+} from "react-native";
 
-import { Colors } from '../constants/Colors';
-import { GlobalStyles } from '../constants/GlobalStyles';
-import { SUPABASE_URL, supabase } from '../lib/supabase';
+import { Colors } from "../constants/Colors";
+import { GlobalStyles } from "../constants/GlobalStyles";
+import { SUPABASE_URL, supabase } from "../lib/supabase";
 
 export default function LoginScreen() {
   const router = useRouter();
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
     const checkSession = async () => {
       // Intentamos obtener la sesión actual
       const { data, error } = await supabase.auth.getSession();
-      
+
       // Si hay error (token inválido, etc.) o si hay sesión pero no redirigió
       if (error) {
-        console.log("⚠️ Sesión inválida detectada en Login. Limpiando...", error.message);
+        console.log(
+          "⚠️ Sesión inválida detectada en Login. Limpiando...",
+          error.message,
+        );
         await supabase.auth.signOut(); // Forzamos limpieza
       }
     };
@@ -42,7 +45,7 @@ export default function LoginScreen() {
   const isConfigMissing = !SUPABASE_URL || SUPABASE_URL === "";
 
   const handleLogin = async () => {
-    if(loading) return;
+    if (loading) return;
     setLoading(true);
 
     const { error } = await supabase.auth.signInWithPassword({
@@ -53,35 +56,49 @@ export default function LoginScreen() {
     setLoading(false);
 
     if (error) {
-      Alert.alert('Error de Acceso', error.message);
+      Alert.alert("Error de Acceso", error.message);
     } else {
-      router.replace('/home');
+      router.replace("/home");
     }
   };
 
   return (
     // 1. Contenedor Principal (Fijo)
     <View style={localStyles.mainContainer}>
-      
       {/* 2. Área que reacciona al teclado (Título, Logo, Formulario) */}
-      <KeyboardAvoidingView 
-        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-        style={[GlobalStyles.containerCentered, { flex: 1, width: '100%' }]}
+      <KeyboardAvoidingView
+        behavior={Platform.OS === "ios" ? "padding" : "height"}
+        style={[GlobalStyles.containerCentered, { flex: 1, width: "100%" }]}
       >
         <Text style={GlobalStyles.title}>PROYECTO</Text>
-        
-        <Image 
-          source={require('../assets/images/isologotipo_light.png')} 
-          style={localStyles.logoImage} 
+
+        <Image
+          source={require("../assets/images/isologotipo_light.png")}
+          style={localStyles.logoImage}
           resizeMode="contain"
         />
 
         {isConfigMissing && (
-          <View style={{backgroundColor: '#ffebee', padding: 10, borderRadius: 8, marginBottom: 20}}>
-            <Text style={{color: '#d32f2f', textAlign: 'center', fontWeight: 'bold'}}>
+          <View
+            style={{
+              backgroundColor: "#ffebee",
+              padding: 10,
+              borderRadius: 8,
+              marginBottom: 20,
+            }}
+          >
+            <Text
+              style={{
+                color: "#d32f2f",
+                textAlign: "center",
+                fontWeight: "bold",
+              }}
+            >
               ⚠️ ERROR: API URL NO DEFINIDA
             </Text>
-            <Text style={{color: '#d32f2f', fontSize: 10, textAlign: 'center'}}>
+            <Text
+              style={{ color: "#d32f2f", fontSize: 10, textAlign: "center" }}
+            >
               El archivo .env no se cargó en el build.
             </Text>
           </View>
@@ -90,7 +107,7 @@ export default function LoginScreen() {
         <View style={localStyles.formContainer}>
           <View style={localStyles.inputWrapper}>
             <Text style={localStyles.label}>Usuario (Email)</Text>
-            <TextInput 
+            <TextInput
               style={localStyles.input}
               placeholder="usuario@email.com"
               autoCapitalize="none"
@@ -101,7 +118,7 @@ export default function LoginScreen() {
 
           <View style={localStyles.inputWrapper}>
             <Text style={localStyles.label}>Contraseña</Text>
-            <TextInput 
+            <TextInput
               style={localStyles.input}
               placeholder="********"
               secureTextEntry
@@ -110,8 +127,15 @@ export default function LoginScreen() {
             />
           </View>
 
-          <TouchableOpacity 
-            style={[GlobalStyles.primaryButton, loading && { opacity: 0.7 }]} 
+          <TouchableOpacity
+            style={{ marginBottom: 20, alignSelf: "flex-end" }}
+            onPress={() => router.push("/forgot-password")}
+          >
+            <Text style={localStyles.linkText}>¿Olvidaste tu contraseña?</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[GlobalStyles.primaryButton, loading && { opacity: 0.7 }]}
             onPress={handleLogin}
             disabled={loading}
           >
@@ -123,26 +147,26 @@ export default function LoginScreen() {
           </TouchableOpacity>
         </View>
       </KeyboardAvoidingView>
-      
+
       {/* 3. Pie de página: Versión, Copyright y Política */}
       <View style={localStyles.footerContainer}>
-        
         {/* Versión */}
         <Text style={localStyles.footerText}>SENSOR App v0.0.1</Text>
-        
+
         {/* Copyright */}
         <Text style={localStyles.footerText}>© 2026 Proyecto SENSOR</Text>
 
         {/* Link a Política de Privacidad */}
-        <TouchableOpacity 
-          onPress={() => Linking.openURL('https://docs.google.com/document/d/1THh1l9COVryfXFRGs47MNe9rPnJuGhcL4Sd_Nh6beCY/edit?usp=sharing')}
+        <TouchableOpacity
+          onPress={() =>
+            Linking.openURL(
+              "https://docs.google.com/document/d/1THh1l9COVryfXFRGs47MNe9rPnJuGhcL4Sd_Nh6beCY/edit?usp=sharing",
+            )
+          }
           style={{ marginTop: 8, padding: 5 }}
         >
-          <Text style={localStyles.linkText}>
-            Política de Privacidad
-          </Text>
+          <Text style={localStyles.linkText}>Política de Privacidad</Text>
         </TouchableOpacity>
-
       </View>
     </View>
   );
@@ -152,16 +176,16 @@ const localStyles = StyleSheet.create({
   // Nuevo contenedor principal
   mainContainer: {
     flex: 1,
-    backgroundColor: Colors.background || '#f2f2f2', // Asegura el color de fondo
+    backgroundColor: Colors.background || "#f2f2f2", // Asegura el color de fondo
   },
   logoImage: {
     width: 200,
     height: 80,
     marginBottom: 30,
-    marginTop: 10
+    marginTop: 10,
   },
   formContainer: {
-    width: '100%',
+    width: "100%",
     paddingHorizontal: 40,
   },
   inputWrapper: {
@@ -171,29 +195,29 @@ const localStyles = StyleSheet.create({
     fontSize: 12,
     color: Colors.textSecondary,
     marginBottom: 5,
-    fontWeight: '600',
+    fontWeight: "600",
   },
   input: {
-    backgroundColor: '#fff',
+    backgroundColor: "#fff",
     borderWidth: 1,
-    borderColor: '#ddd',
+    borderColor: "#ddd",
     borderRadius: 8,
     padding: 12,
     fontSize: 16,
     color: Colors.textPrimary,
   },
   versionText: {
-    position: 'absolute',
+    position: "absolute",
     bottom: 70, // Ajustado un poco para margen seguro
-    alignSelf: 'center', // Centrado horizontalmente
+    alignSelf: "center", // Centrado horizontalmente
     color: Colors.textSecondary,
-    fontSize: 12
+    fontSize: 12,
   },
   footerContainer: {
-    position: 'absolute',
+    position: "absolute",
     bottom: 30, // Margen desde abajo
-    width: '100%',
-    alignItems: 'center',
+    width: "100%",
+    alignItems: "center",
     paddingBottom: 10,
   },
   footerText: {
@@ -202,9 +226,9 @@ const localStyles = StyleSheet.create({
     marginBottom: 2, // Espacio entre líneas
   },
   linkText: {
-    color: '#007AFF', // Azul estándar de enlaces
+    color: "#007AFF", // Azul estándar de enlaces
     fontSize: 12,
-    textDecorationLine: 'underline',
-    fontWeight: '500',
-  }
+    textDecorationLine: "underline",
+    fontWeight: "500",
+  },
 });
