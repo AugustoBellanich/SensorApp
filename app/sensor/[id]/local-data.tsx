@@ -29,13 +29,19 @@ import { Colors } from "../../../constants/Colors";
 
 // Lógica
 import { getElectrodesBySensor } from "../../../database/ElectrodeRepository";
-import { deleteReadingsRange } from "../../../database/ReadingsRepository";
+import {
+  deleteReadingsRange,
+  getSensorStorageInfo,
+} from "../../../database/ReadingsRepository";
 import { getSensorById } from "../../../database/SensorRepository";
 import {
   ElectrodeEntity,
   LinearSegment,
   SensorEntity,
 } from "../../../database/types";
+
+// Sync
+import { syncService } from "../../../services/syncService";
 
 // Utils
 import { calculateMoistureFromSegments } from "../../../utils/calibration";
@@ -57,6 +63,12 @@ const CLIMATE_LINES = [
   { value: 35, label: "Calor Ext.", color: "#FF7043" },
 ];
 
+const formatBytes = (bytes: number): string => {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+};
+
 export default function LocalDataScreen() {
   const { id } = useLocalSearchParams();
   const rawId = Array.isArray(id) ? id[0] : id;
@@ -70,12 +82,19 @@ export default function LocalDataScreen() {
   const [loadingMessage, setLoadingMessage] = useState("");
   const [sensorDb, setSensorDb] = useState<SensorEntity | null>(null);
 
-  // Filtros
-  const [dateStart, setDateStart] = useState(
-    new Date(new Date().setDate(new Date().getDate() - 7)),
-  ); // Default 7 días
+  // Filtros: dateStart arranca vacío. Sin botón "Consultar": se dispara
+  // la búsqueda apenas el usuario elige ambas fechas (ver onDateChange).
+  const [dateStart, setDateStart] = useState<Date | null>(null);
   const [dateEnd, setDateEnd] = useState(new Date());
   const [showPicker, setShowPicker] = useState<"start" | "end" | null>(null);
+
+  // Rango REALMENTE consultado (usado para reprocesar al cambiar unidad).
+  // Es distinto de dateStart/dateEnd porque estos últimos pueden ir un
+  // paso adelante mientras el usuario está tocando el picker.
+  const [queriedRange, setQueriedRange] = useState<{
+    start: Date;
+    end: Date;
+  } | null>(null);
 
   // Configs
   const [unit, setUnit] = useState<UnitType>("% Hv");
@@ -97,6 +116,25 @@ export default function LocalDataScreen() {
 
   // Agro Stats
   const [agroStats, setAgroStats] = useState({ chill: 0, frost: 0, heat: 0 });
+
+  // Sync a nube
+  const [syncingCloud, setSyncingCloud] = useState(false);
+
+  // Almacenamiento local del sensor (independiente del rango consultado)
+  const [storageInfo, setStorageInfo] = useState<{
+    count: number;
+    estimatedBytes: number;
+  } | null>(null);
+
+  const refreshStorageInfo = useCallback(async () => {
+    if (!sensorDb) return;
+    try {
+      const info = await getSensorStorageInfo(sensorId, sensorDb.type);
+      setStorageInfo(info);
+    } catch {
+      // silencioso: es solo informativo
+    }
+  }, [sensorDb, sensorId]);
 
   // 1. Init
   useEffect(() => {
@@ -130,6 +168,11 @@ export default function LocalDataScreen() {
     loadConfig();
   }, [sensorId]);
 
+  // Cargar info de almacenamiento apenas tenemos el sensor
+  useEffect(() => {
+    refreshStorageInfo();
+  }, [refreshStorageInfo]);
+
   const calcStats = useCallback((arr: any[]) => {
     if (!arr.length) return { min: 0, max: 0, avg: 0 };
     const vals = arr.map((d) => Number(d.value) || 0);
@@ -139,10 +182,16 @@ export default function LocalDataScreen() {
   }, []);
 
   // --- PROCESAMIENTO B01 ---
+  // IMPORTANTE: recibe start/end como PARÁMETROS explícitos, no los lee
+  // de dateStart/dateEnd (estado). Si dependiera del estado, el closure
+  // de esta función podía quedar un paso atrasado respecto a la
+  // selección real del usuario (bug: la 1ra selección no graficaba
+  // nada porque dateStart todavía era null en ese closure; la 2da
+  // graficaba con el rango de la selección ANTERIOR). Pasar start/end
+  // como argumentos elimina esa dependencia de timing por completo.
   const processB01 = useCallback(
-    (data: any[]) => {
-      // 1. Calcular configuración óptima basada en FECHAS (no solo datos)
-      const settings = getOptimalInterval(dateStart, dateEnd);
+    (data: any[], start: Date, end: Date) => {
+      const settings = getOptimalInterval(start, end);
       const { intervalMs, labelFormat } = settings;
 
       const processed = data.map((d: any) => {
@@ -171,9 +220,9 @@ export default function LocalDataScreen() {
         return { ...d, v1, v2, v3 };
       });
 
-      // Grilla temporal (Alineada al intervalo para fillTimeGaps)
-      const startMs = dateStart.getTime();
-      const endMs = dateEnd.getTime();
+      // Grilla temporal (alineada al intervalo para fillTimeGaps)
+      const startMs = start.getTime();
+      const endMs = end.getTime();
       const startDate = new Date(Math.floor(startMs / intervalMs) * intervalMs);
       const endDate = new Date(Math.ceil(endMs / intervalMs) * intervalMs);
 
@@ -183,8 +232,6 @@ export default function LocalDataScreen() {
           return v !== undefined && v !== null && !isNaN(v) && v > 0;
         });
 
-        // Siempre agrupamos por intervalo: mediana como línea central +
-        // min/max del bucket para la banda de variación.
         const downsampled = downsampleData(validData, key, intervalMs);
         const stats = calcStats(downsampled);
         const filled = fillTimeGaps(
@@ -201,13 +248,12 @@ export default function LocalDataScreen() {
       setElectrodesData({ 1: prep("v1"), 2: prep("v2"), 3: prep("v3") });
       setSoilTempData(prep("soil_temp"));
     },
-    [unit, electrodesInfo, electrodeConfig, calcStats, dateStart, dateEnd],
+    [unit, electrodesInfo, electrodeConfig, calcStats],
   );
 
-  // --- PROCESAMIENTO C01 ---
+  // --- PROCESAMIENTO C01 --- (mismo criterio: start/end como parámetros)
   const processC01 = useCallback(
-    (data: any[]) => {
-      // 1. Cálculo de Horas Agronómicas
+    (data: any[], start: Date, end: Date) => {
       const intervalHours = 0.25;
       let chill = 0,
         frost = 0,
@@ -228,13 +274,11 @@ export default function LocalDataScreen() {
         heat: Number(heat.toFixed(1)),
       });
 
-      // 2. Configuración Óptima
-      const settings = getOptimalInterval(dateStart, dateEnd);
+      const settings = getOptimalInterval(start, end);
       const { intervalMs, labelFormat } = settings;
 
-      // Grilla temporal
-      const startMs = dateStart.getTime();
-      const endMs = dateEnd.getTime();
+      const startMs = start.getTime();
+      const endMs = end.getTime();
       const startDate = new Date(Math.floor(startMs / intervalMs) * intervalMs);
       const endDate = new Date(Math.ceil(endMs / intervalMs) * intervalMs);
 
@@ -258,17 +302,17 @@ export default function LocalDataScreen() {
       };
       setClimateData({ temp: prep("air_temp"), hum: prep("humidity") });
     },
-    [calcStats, dateStart, dateEnd],
+    [calcStats],
   );
 
   const processData = useCallback(
-    (data: any[], type: string) => {
+    (data: any[], type: string, start: Date, end: Date) => {
       const safeType = type.toUpperCase();
       setLoading(true);
       setLoadingMessage("Procesando gráficos...");
       setTimeout(() => {
-        if (safeType === "B01") processB01(data);
-        else if (safeType === "C01") processC01(data);
+        if (safeType === "B01") processB01(data, start, end);
+        else if (safeType === "C01") processC01(data, start, end);
         setLoading(false);
       }, 50);
     },
@@ -286,7 +330,6 @@ export default function LocalDataScreen() {
 
       try {
         const tableName = type === "B01" ? "readings_b01" : "readings_c01";
-        // Ajustamos fechas para cubrir el día completo
         const s = new Date(start);
         s.setHours(0, 0, 0, 0);
         const e = new Date(end);
@@ -317,9 +360,11 @@ export default function LocalDataScreen() {
 
         if (results.length > 0) {
           setLocalData(results);
-          processData(results, type);
+          setQueriedRange({ start, end });
+          processData(results, type, start, end);
         } else {
           setLocalData([]);
+          setQueriedRange(null);
           setElectrodesData(null);
           setClimateData(null);
           Alert.alert(
@@ -336,15 +381,18 @@ export default function LocalDataScreen() {
     [sensorId, processData],
   );
 
-  // Efectos
+  // Reprocesa al cambiar la unidad (mV / Hv / Hg), usando el rango
+  // REALMENTE consultado (queriedRange), no dateStart/dateEnd — evita
+  // el mismo tipo de desfasaje si el usuario cambió la unidad justo
+  // después de tocar el picker pero antes de que la búsqueda termine.
   useEffect(() => {
-    if (isConfigLoaded && sensorDb)
-      handleSearchData(sensorDb, dateStart, dateEnd);
-  }, [isConfigLoaded, dateStart, dateEnd, handleSearchData, sensorDb]);
-
-  useEffect(() => {
-    if (localData.length > 0 && sensorDb) {
-      processData(localData, sensorDb.type);
+    if (localData.length > 0 && sensorDb && queriedRange) {
+      processData(
+        localData,
+        sensorDb.type,
+        queriedRange.start,
+        queriedRange.end,
+      );
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [unit]);
@@ -411,6 +459,7 @@ export default function LocalDataScreen() {
   };
 
   const handleDeleteData = () => {
+    if (!dateStart || !sensorDb) return;
     Alert.alert(
       "¿Eliminar datos?",
       `Se borrarán del ${dateStart.toLocaleDateString()} al ${dateEnd.toLocaleDateString()}.`,
@@ -425,11 +474,12 @@ export default function LocalDataScreen() {
               setLoadingMessage("Eliminando...");
               await deleteReadingsRange(
                 sensorId,
-                sensorDb!.type,
+                sensorDb.type,
                 dateStart,
                 dateEnd,
               );
-              handleSearchData(sensorDb!, dateStart, dateEnd);
+              await handleSearchData(sensorDb, dateStart, dateEnd);
+              await refreshStorageInfo();
               Alert.alert("Eliminado", "Datos borrados.");
             } catch {
               Alert.alert("Error", "No se pudo borrar.");
@@ -442,20 +492,115 @@ export default function LocalDataScreen() {
     );
   };
 
+  // --- SINCRONIZAR CON LA NUBE (rango completo, ignora is_synced) ---
+  const handleSyncCloud = async () => {
+    if (!dateStart || !sensorDb) return;
+    Alert.alert(
+      "Sincronizar con la nube",
+      `Se enviarán los registros locales del ${dateStart.toLocaleDateString()} al ${dateEnd.toLocaleDateString()} para compararlos con la nube (los que ya existan se ignoran).`,
+      [
+        { text: "Cancelar", style: "cancel" },
+        {
+          text: "Sincronizar",
+          onPress: async () => {
+            setSyncingCloud(true);
+            setLoading(true);
+            setLoadingMessage("Sincronizando con la nube...");
+            try {
+              const result = await syncService.syncSensorRange(
+                sensorId,
+                sensorDb.type as "B01" | "C01",
+                dateStart,
+                dateEnd,
+                (processed, total) => {
+                  setLoadingMessage(`Sincronizando... ${processed}/${total}`);
+                },
+              );
+              if (result.received === 0) {
+                Alert.alert(
+                  "Sin datos",
+                  "No hay registros locales en el rango seleccionado.",
+                );
+              } else {
+                Alert.alert(
+                  "Sincronización completada",
+                  `${result.received} registros revisados.\n${result.inserted} nuevos.\n${result.duplicates} ya estaban en la nube.`,
+                );
+              }
+            } catch (e: any) {
+              if (e?.message === "OFFLINE") {
+                Alert.alert(
+                  "Sin conexión",
+                  "Necesitás conexión a internet para sincronizar.",
+                );
+              } else if (e?.message === "NO_PERMISSION") {
+                Alert.alert(
+                  "Sin permisos",
+                  "No tenés permisos de edición sobre este sensor.",
+                );
+              } else if (e?.partial) {
+                const p = e.partial;
+                Alert.alert(
+                  "Sincronización interrumpida",
+                  `Se procesaron ${p.inserted + p.duplicates} de ${p.received} registros antes del error.`,
+                );
+              } else {
+                Alert.alert("Error", "No se pudo completar la sincronización.");
+              }
+            } finally {
+              setSyncingCloud(false);
+              setLoading(false);
+            }
+          },
+        },
+      ],
+    );
+  };
+
+  // --- DATEPICKER: sin botón "Consultar", dispara la búsqueda apenas
+  // hay ambas fechas (mismo patrón que cloud-data.tsx) ---
   const onDateChange = (event: any, selectedDate?: Date) => {
     const type = showPicker;
     setShowPicker(null);
     if (event.type === "dismissed" || !selectedDate) return;
+
+    let newStart = dateStart;
+    let newEnd = dateEnd;
+
     if (type === "start") {
-      setDateStart(selectedDate);
-      if (selectedDate > dateEnd) setDateEnd(selectedDate);
+      newStart = selectedDate;
+      if (newStart > newEnd) newEnd = newStart;
     } else {
-      if (selectedDate < dateStart) Alert.alert("Error", "Fecha inválida");
-      else setDateEnd(selectedDate);
+      if (dateStart && selectedDate < dateStart) {
+        Alert.alert("Error", "La fecha 'Hasta' no puede ser menor a 'Desde'");
+        return;
+      }
+      newEnd = selectedDate;
+    }
+
+    setDateStart(newStart);
+    setDateEnd(newEnd);
+
+    setLocalData([]);
+    setElectrodesData(null);
+    setSoilTempData(null);
+    setClimateData(null);
+
+    if (newStart && newEnd && sensorDb) {
+      handleSearchData(sensorDb, newStart, newEnd);
     }
   };
 
   const type = sensorDb?.type.toUpperCase();
+
+  const canSyncCloud = (() => {
+    try {
+      const cfg = JSON.parse(sensorDb?.config_json || "{}");
+      return cfg.role !== "viewer";
+    } catch {
+      return true;
+    }
+  })();
 
   return (
     <View style={[styles.container, { paddingTop: insets.top }]}>
@@ -482,14 +627,14 @@ export default function LocalDataScreen() {
         scrollEnabled={!loading}
       >
         <View style={styles.filterCard}>
-          <View style={styles.dateRow}>
+          <View style={[styles.dateRow, { marginBottom: 0 }]}>
             <TouchableOpacity
               style={styles.dateBtn}
               onPress={() => setShowPicker("start")}
             >
               <Text style={styles.dateLabel}>Desde</Text>
               <Text style={styles.dateVal}>
-                {dateStart.toLocaleDateString()}
+                {dateStart ? dateStart.toLocaleDateString() : "Seleccionar..."}
               </Text>
             </TouchableOpacity>
             <MaterialCommunityIcons name="arrow-right" size={20} color="#ccc" />
@@ -501,17 +646,22 @@ export default function LocalDataScreen() {
               <Text style={styles.dateVal}>{dateEnd.toLocaleDateString()}</Text>
             </TouchableOpacity>
           </View>
-          <TouchableOpacity
-            style={styles.searchButton}
-            onPress={() =>
-              sensorDb && handleSearchData(sensorDb, dateStart, dateEnd)
-            }
-            disabled={loading}
-          >
-            <MaterialCommunityIcons name="magnify" size={24} color="#fff" />
-            <Text style={styles.searchBtnText}>Consultar Datos</Text>
-          </TouchableOpacity>
         </View>
+
+        {storageInfo && (
+          <View style={styles.storageCard}>
+            <MaterialCommunityIcons
+              name="database-outline"
+              size={20}
+              color={Colors.textSecondary}
+            />
+            <Text style={styles.storageText}>
+              {storageInfo.count.toLocaleString("es-AR")} registros guardados en
+              este dispositivo (~
+              {formatBytes(storageInfo.estimatedBytes)}, estimado)
+            </Text>
+          </View>
+        )}
 
         {localData.length > 0 && (
           <View style={styles.toolbar}>
@@ -527,6 +677,22 @@ export default function LocalDataScreen() {
               />
               <Text style={[styles.toolText, { color: "#2E7D32" }]}>Excel</Text>
             </TouchableOpacity>
+            {canSyncCloud && (
+              <TouchableOpacity
+                style={[styles.toolBtn, { backgroundColor: "#E3F2FD" }]}
+                onPress={handleSyncCloud}
+                disabled={loading || syncingCloud}
+              >
+                <MaterialCommunityIcons
+                  name="cloud-upload-outline"
+                  size={22}
+                  color="#1565C0"
+                />
+                <Text style={[styles.toolText, { color: "#1565C0" }]}>
+                  Nube
+                </Text>
+              </TouchableOpacity>
+            )}
             <TouchableOpacity
               style={[styles.toolBtn, { backgroundColor: "#FFEBEE" }]}
               onPress={handleDeleteData}
@@ -556,7 +722,6 @@ export default function LocalDataScreen() {
           </View>
         )}
 
-        {/* PANEL AGRO PARA CLIMA (C01) */}
         {type === "C01" && localData.length > 0 && (
           <View style={styles.agroPanel}>
             <View style={styles.agroItem}>
@@ -656,7 +821,7 @@ export default function LocalDataScreen() {
 
         {showPicker && (
           <DateTimePicker
-            value={showPicker === "start" ? dateStart : dateEnd}
+            value={showPicker === "start" ? dateStart || new Date() : dateEnd}
             mode="date"
             display="default"
             onChange={onDateChange}
@@ -717,16 +882,19 @@ const styles = StyleSheet.create({
   },
   dateLabel: { fontSize: 10, color: "#888" },
   dateVal: { fontSize: 14, fontWeight: "bold", color: "#333" },
-  searchButton: {
+  storageCard: {
     flexDirection: "row",
-    backgroundColor: Colors.primary,
-    padding: 12,
-    borderRadius: 10,
-    justifyContent: "center",
     alignItems: "center",
+    marginHorizontal: 16,
+    marginBottom: 15,
+    backgroundColor: "#fff",
+    borderRadius: 10,
+    padding: 10,
+    borderWidth: 1,
+    borderColor: "#eee",
     gap: 8,
   },
-  searchBtnText: { color: "#fff", fontWeight: "bold", fontSize: 16 },
+  storageText: { fontSize: 12, color: Colors.textSecondary, flex: 1 },
   toolbar: {
     flexDirection: "row",
     paddingHorizontal: 16,
