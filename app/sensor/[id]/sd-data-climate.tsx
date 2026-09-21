@@ -23,6 +23,7 @@ import { captureRef } from "react-native-view-shot";
 import * as XLSX from "xlsx";
 
 // Componentes
+import AgroSummaryPanel from "../../../components/sensor/AgroSummaryPanel";
 import SensorChart from "../../../components/sensor/SensorChart";
 import StatPanel from "../../../components/sensor/StatPanel";
 import { Colors } from "../../../constants/Colors";
@@ -205,7 +206,6 @@ export default function SDDataClimateScreen() {
 
   // Gráficas y Stats
   const [climateChartData, setClimateChartData] = useState<any>(null);
-  const [agroStats, setAgroStats] = useState({ chill: 0, frost: 0, heat: 0 });
 
   // Inicialización
   useEffect(() => {
@@ -261,28 +261,7 @@ export default function SDDataClimateScreen() {
     (rawData: any[]) => {
       if (!sensorDb || rawData.length === 0) return;
 
-      // --- 1. CÁLCULO DE HORAS AGRONÓMICAS (Sobre datos crudos) ---
-      const intervalHours = 0.25;
-      let chill = 0,
-        frost = 0,
-        heat = 0;
-
-      rawData.forEach((d) => {
-        const t = d.air_temp;
-        if (t !== undefined && t !== null && !isNaN(t)) {
-          if (t <= 7.2) chill += intervalHours;
-          if (t <= 0) frost += intervalHours;
-          if (t >= 35) heat += intervalHours;
-        }
-      });
-
-      setAgroStats({
-        chill: Number(chill.toFixed(1)),
-        frost: Number(frost.toFixed(1)),
-        heat: Number(heat.toFixed(1)),
-      });
-
-      // --- 2. OPTIMIZACIÓN DE GRÁFICO ---
+      // --- OPTIMIZACIÓN DE GRÁFICO ---
       const settings = optimizeChartData(rawData);
       const { intervalMs, labelFormat } = settings;
 
@@ -593,37 +572,10 @@ export default function SDDataClimateScreen() {
             </View>
 
             {/* --- PANEL AGRO --- */}
-            <View style={styles.agroPanel}>
-              <View style={styles.agroItem}>
-                <MaterialCommunityIcons
-                  name="snowflake"
-                  size={24}
-                  color="#1E88E5"
-                />
-                <Text style={styles.agroValue}>{agroStats.chill} h</Text>
-                <Text style={styles.agroLabel}>Frío (&lt;7.2°)</Text>
-              </View>
-              <View style={styles.dividerVertical} />
-              <View style={styles.agroItem}>
-                <MaterialCommunityIcons
-                  name="thermometer-alert"
-                  size={24}
-                  color="#4FC3F7"
-                />
-                <Text style={styles.agroValue}>{agroStats.frost} h</Text>
-                <Text style={styles.agroLabel}>Helada (&lt;0°)</Text>
-              </View>
-              <View style={styles.dividerVertical} />
-              <View style={styles.agroItem}>
-                <MaterialCommunityIcons
-                  name="white-balance-sunny"
-                  size={24}
-                  color="#FF7043"
-                />
-                <Text style={styles.agroValue}>{agroStats.heat} h</Text>
-                <Text style={styles.agroLabel}>Calor (&gt;35°)</Text>
-              </View>
-            </View>
+            <AgroSummaryPanel
+              readings={downloadedData}
+              periodLabel={getDateRangeLabel()}
+            />
 
             <View style={styles.content}>
               <ExportableChartCard

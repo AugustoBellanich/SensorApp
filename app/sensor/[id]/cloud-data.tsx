@@ -20,6 +20,7 @@ import * as XLSX from "xlsx";
 
 // Componentes
 import SegmentedControl from "../../../components/global/SegmentedControl";
+import AgroSummaryPanel from "../../../components/sensor/AgroSummaryPanel";
 import SensorChart from "../../../components/sensor/SensorChart";
 import StatPanel from "../../../components/sensor/StatPanel";
 import { Colors } from "../../../constants/Colors";
@@ -88,9 +89,6 @@ export default function CloudDataScreen() {
   const [electrodesData, setElectrodesData] = useState<any>(null);
   const [soilTempData, setSoilTempData] = useState<any>(null);
   const [climateData, setClimateData] = useState<any>(null);
-
-  // Indicadores Agronómicos
-  const [agroStats, setAgroStats] = useState({ chill: 0, frost: 0, heat: 0 });
 
   // 1. Init: Cargar Configuración Local del Sensor
   useEffect(() => {
@@ -207,37 +205,6 @@ export default function CloudDataScreen() {
 
       const rangeEnd = new Date(dateEnd);
       rangeEnd.setHours(23, 59, 59, 999);
-
-      // Estadísticas Agronómicas (sobre datos crudos)
-      let chill = 0,
-        frost = 0,
-        heat = 0;
-
-      const sorted = [...data].sort(
-        (a, b) =>
-          new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime(),
-      );
-
-      for (let i = 1; i < sorted.length; i++) {
-        const t1 = new Date(sorted[i - 1].timestamp).getTime();
-        const t2 = new Date(sorted[i].timestamp).getTime();
-        const hours = (t2 - t1) / 3600000;
-
-        if (hours > 24) continue; // Ignorar huecos gigantes
-
-        const t = Number(sorted[i].air_temp);
-        if (t !== undefined && !isNaN(t)) {
-          if (t > 0 && t <= 7.2) chill += hours;
-          if (t <= 0) frost += hours;
-          if (t >= 35) heat += hours;
-        }
-      }
-
-      setAgroStats({
-        chill: Number(chill.toFixed(1)),
-        frost: Number(frost.toFixed(1)),
-        heat: Number(heat.toFixed(1)),
-      });
 
       // 2. Gráficos - Configuración Óptima con fechas expandidas
       const settings = getOptimalInterval(rangeStart, rangeEnd);
@@ -528,51 +495,10 @@ export default function CloudDataScreen() {
 
         {/* PANEL AGRO (C01) */}
         {sensorDb?.type === "C01" && cloudData.length > 0 && (
-          <View style={styles.agroPanel}>
-            <View style={styles.agroItem}>
-              <MaterialCommunityIcons
-                name="snowflake"
-                size={24}
-                color="#1E88E5"
-              />
-              <Text style={styles.agroValue}>
-                {Math.round(agroStats.chill)} h
-              </Text>
-              <Text style={styles.agroLabel}>Horas Frío</Text>
-            </View>
-            <View style={styles.dividerVertical} />
-            <View style={styles.agroItem}>
-              <MaterialCommunityIcons
-                name="alert-octagon"
-                size={24}
-                color={agroStats.frost > 0 ? Colors.error : "#ccc"}
-              />
-              <Text
-                style={[
-                  styles.agroValue,
-                  {
-                    color:
-                      agroStats.frost > 0 ? Colors.error : Colors.textPrimary,
-                  },
-                ]}
-              >
-                {Math.round(agroStats.frost)} h
-              </Text>
-              <Text style={styles.agroLabel}>Heladas</Text>
-            </View>
-            <View style={styles.dividerVertical} />
-            <View style={styles.agroItem}>
-              <MaterialCommunityIcons
-                name="white-balance-sunny"
-                size={24}
-                color={Colors.warning}
-              />
-              <Text style={styles.agroValue}>
-                {Math.round(agroStats.heat)} h
-              </Text>
-              <Text style={styles.agroLabel}>Calor Ext.</Text>
-            </View>
-          </View>
+          <AgroSummaryPanel
+            readings={cloudData}
+            periodLabel={`${dateStart?.toLocaleDateString()} - ${dateEnd.toLocaleDateString()}`}
+          />
         )}
 
         {/* Gráficos B01 */}

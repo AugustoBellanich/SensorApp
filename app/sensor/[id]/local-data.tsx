@@ -23,6 +23,7 @@ import { db } from "../../../database/DatabaseInit";
 
 // Componentes
 import SegmentedControl from "../../../components/global/SegmentedControl";
+import AgroSummaryPanel from "../../../components/sensor/AgroSummaryPanel";
 import SensorChart from "../../../components/sensor/SensorChart";
 import StatPanel from "../../../components/sensor/StatPanel";
 import { Colors } from "../../../constants/Colors";
@@ -113,9 +114,6 @@ export default function LocalDataScreen() {
   const [electrodesData, setElectrodesData] = useState<any>(null);
   const [soilTempData, setSoilTempData] = useState<any>(null);
   const [climateData, setClimateData] = useState<any>(null);
-
-  // Agro Stats
-  const [agroStats, setAgroStats] = useState({ chill: 0, frost: 0, heat: 0 });
 
   // Sync a nube
   const [syncingCloud, setSyncingCloud] = useState(false);
@@ -254,26 +252,6 @@ export default function LocalDataScreen() {
   // --- PROCESAMIENTO C01 --- (mismo criterio: start/end como parámetros)
   const processC01 = useCallback(
     (data: any[], start: Date, end: Date) => {
-      const intervalHours = 0.25;
-      let chill = 0,
-        frost = 0,
-        heat = 0;
-
-      data.forEach((d) => {
-        const t = d.air_temp;
-        if (t !== undefined && t !== null && !isNaN(t)) {
-          if (t <= 7.2) chill += intervalHours;
-          if (t <= 0) frost += intervalHours;
-          if (t >= 35) heat += intervalHours;
-        }
-      });
-
-      setAgroStats({
-        chill: Number(chill.toFixed(1)),
-        frost: Number(frost.toFixed(1)),
-        heat: Number(heat.toFixed(1)),
-      });
-
       const settings = getOptimalInterval(start, end);
       const { intervalMs, labelFormat } = settings;
 
@@ -723,37 +701,10 @@ export default function LocalDataScreen() {
         )}
 
         {type === "C01" && localData.length > 0 && (
-          <View style={styles.agroPanel}>
-            <View style={styles.agroItem}>
-              <MaterialCommunityIcons
-                name="snowflake"
-                size={24}
-                color="#1E88E5"
-              />
-              <Text style={styles.agroValue}>{agroStats.chill} h</Text>
-              <Text style={styles.agroLabel}>Frío (&lt;7.2°)</Text>
-            </View>
-            <View style={styles.dividerVertical} />
-            <View style={styles.agroItem}>
-              <MaterialCommunityIcons
-                name="thermometer-alert"
-                size={24}
-                color="#4FC3F7"
-              />
-              <Text style={styles.agroValue}>{agroStats.frost} h</Text>
-              <Text style={styles.agroLabel}>Helada (&lt;0°)</Text>
-            </View>
-            <View style={styles.dividerVertical} />
-            <View style={styles.agroItem}>
-              <MaterialCommunityIcons
-                name="white-balance-sunny"
-                size={24}
-                color="#FF7043"
-              />
-              <Text style={styles.agroValue}>{agroStats.heat} h</Text>
-              <Text style={styles.agroLabel}>Calor (&gt;35°)</Text>
-            </View>
-          </View>
+          <AgroSummaryPanel
+            readings={localData}
+            periodLabel={`${dateStart?.toLocaleDateString()} - ${dateEnd.toLocaleDateString()}`}
+          />
         )}
 
         {type === "B01" && electrodesData && (

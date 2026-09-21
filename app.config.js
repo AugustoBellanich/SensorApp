@@ -1,11 +1,11 @@
 export default ({ config }) => {
-  const isTest = process.env.APP_VARIANT === 'test';
+  const isTest = process.env.APP_VARIANT === "test";
 
   return {
     ...config,
     name: isTest ? "SENSOR APP (TEST)" : "SENSOR APP",
     slug: "SensorApp",
-    version: "1.0.0",
+    version: "1.1.0",
     orientation: "portrait",
     icon: "./assets/images/icon.png",
     scheme: "sensorapp",
@@ -16,19 +16,19 @@ export default ({ config }) => {
     splash: {
       image: "./assets/images/isologotipo_light.png",
       resizeMode: "contain",
-      backgroundColor: "#ffffff"
+      backgroundColor: "#ffffff",
     },
 
     android: {
       adaptiveIcon: {
         foregroundImage: "./assets/images/icon.png",
-        backgroundColor: "#ffffff"
+        backgroundColor: "#ffffff",
       },
       package: isTest ? "com.bellanich.sensor.test" : "com.inta.sensorapp",
       versionCode: 1,
       edgeToEdgeEnabled: true,
       predictiveBackGestureEnabled: false,
-      
+
       // --- CORRECCIÓN AQUÍ: Forzar Splash en Android ---
       splash: {
         image: "./assets/images/isologotipo_light.png",
@@ -43,8 +43,8 @@ export default ({ config }) => {
         "android.permission.BLUETOOTH_ADMIN",
         "android.permission.BLUETOOTH_CONNECT",
         "android.permission.BLUETOOTH_SCAN",
-        "android.permission.ACCESS_FINE_LOCATION"
-      ]
+        "android.permission.ACCESS_FINE_LOCATION",
+      ],
     },
 
     plugins: [
@@ -54,40 +54,42 @@ export default ({ config }) => {
       [
         "expo-splash-screen",
         {
-          "backgroundColor": "#ffffff",
-          "image": "./assets/images/isologotipo_light.png",
-          "resizeMode": "contain",
-          "imageWidth": 180 // Un valor seguro si el automático falla
-        }
+          backgroundColor: "#ffffff",
+          image: "./assets/images/isologotipo_light.png",
+          resizeMode: "contain",
+          imageWidth: 180, // Un valor seguro si el automático falla
+        },
       ],
       [
         "expo-build-properties",
         {
-          "android": {
-            "enableProguardInReleaseBuilds": false,
-            "extraProguardRules": "-keep class com.polidea.reactnativeble.** { *; } -keep class com.rxandroidble2.** { *; }"
-          }
-        }
+          android: {
+            enableProguardInReleaseBuilds: false,
+            extraProguardRules:
+              "-keep class com.polidea.reactnativeble.** { *; } -keep class com.rxandroidble2.** { *; }",
+          },
+        },
       ],
       [
         "@config-plugins/react-native-ble-plx",
         {
-          "isBackgroundEnabled": false,
-          "modes": ["central"],
-          "bluetoothAlwaysPermission": "Permitir a Sensor App conectarse a los sensores",
-        }
-      ]
+          isBackgroundEnabled: false,
+          modes: ["central"],
+          bluetoothAlwaysPermission:
+            "Permitir a Sensor App conectarse a los sensores",
+        },
+      ],
     ],
 
     experiments: {
       typedRoutes: true,
-      reactCompiler: true
+      reactCompiler: true,
     },
 
     extra: {
       eas: {
-        projectId: "774c2479-0afa-410e-945b-9dba254d7924"
-      }
-    }
+        projectId: "774c2479-0afa-410e-945b-9dba254d7924",
+      },
+    },
   };
 };
