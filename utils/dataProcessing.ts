@@ -1,12 +1,24 @@
-// app/utils/dataProcessing.ts
+const MONTHS_ES = [
+  "Ene",
+  "Feb",
+  "Mar",
+  "Abr",
+  "May",
+  "Jun",
+  "Jul",
+  "Ago",
+  "Sep",
+  "Oct",
+  "Nov",
+  "Dic",
+];
+
+export type ChartLabelFormat = "time" | "date" | "month";
 
 export const calculateMedian = (values: number[]): number => {
   if (values.length === 0) return 0;
-
-  // Ordenamos de menor a mayor
   const sorted = [...values].sort((a, b) => a - b);
   const mid = Math.floor(sorted.length / 2);
-
   if (sorted.length % 2 === 0) {
     return (sorted[mid - 1] + sorted[mid]) / 2;
   }
@@ -14,15 +26,59 @@ export const calculateMedian = (values: number[]): number => {
 };
 
 /**
+ * Único lugar que decide el intervalo de agrupación (bucket) y el
+ * formato de etiqueta según el rango de fechas seleccionado. Los 4
+ * lugares donde se grafican datos (nube, local, SD suelo, SD clima)
+ * llaman a esta misma función, en vez de tener cada uno su propia
+ * copia — evitaba que las 4 pantallas se desincronizaran entre sí.
+ */
+export const getOptimalInterval = (
+  startDate: Date,
+  endDate: Date,
+): { intervalMs: number; labelFormat: ChartLabelFormat } => {
+  const totalDurationMs = endDate.getTime() - startDate.getTime();
+  const diffHours = totalDurationMs / (1000 * 60 * 60);
+
+  const MIN_10 = 10 * 60 * 1000;
+  const HOUR_1 = 60 * 60 * 1000;
+  const HOUR_6 = 6 * HOUR_1;
+  const HOUR_12 = 12 * HOUR_1;
+  const DAY_1 = 24 * HOUR_1;
+  const DAY_30 = 30 * DAY_1;
+
+  if (diffHours <= 24) {
+    return { intervalMs: MIN_10, labelFormat: "time" };
+  }
+  if (diffHours <= 48) {
+    return { intervalMs: HOUR_1, labelFormat: "time" };
+  }
+  if (diffHours <= 120) {
+    // 5 días
+    return { intervalMs: HOUR_6, labelFormat: "time" };
+  }
+  if (diffHours <= 168) {
+    // 7 días
+    return { intervalMs: HOUR_12, labelFormat: "time" };
+  }
+  if (diffHours <= 744) {
+    // 31 días
+    return { intervalMs: DAY_1, labelFormat: "date" };
+  }
+  // > 31 días: agrupamos en bloques aproximados de 30 días. No es un
+  // mes calendario exacto, pero alcanza para una vista de tendencia
+  // de largo plazo sin generar miles de puntos.
+  return { intervalMs: DAY_30, labelFormat: "month" };
+};
+
+/**
  * Reduce la cantidad de puntos agrupándolos por intervalo de tiempo.
- * @param data Array de datos crudos
- * @param key La propiedad a leer (ej: 'soil_temp', 'v1')
- * @param intervalMs El tamaño de la ventana de tiempo en ms (ej: 3600000 para 1h)
+ * Guarda mediana (línea central), y min/max del bucket (para la banda
+ * de variación del gráfico).
  */
 export const downsampleData = (
   data: any[],
   key: string,
-  intervalMs: number
+  intervalMs: number,
 ): any[] => {
   if (!data || data.length === 0) return [];
 
@@ -32,19 +88,13 @@ export const downsampleData = (
   data.forEach((item) => {
     let val = item[key];
 
-    // Validación numérica estricta
     if (val === undefined || val === null || val === "") return;
     val = Number(val);
     if (isNaN(val)) return;
 
-    // FILTRO DE CALIDAD: Ignoramos 0 absoluto si no es lógico (opcional)
-    // if (val === 0) return;
-
     const tsRaw = new Date(item.timestamp).getTime();
     if (isNaN(tsRaw)) return;
 
-    // "Redondeamos" el tiempo al inicio del intervalo (Bucket)
-    // Ej: 14:15, 14:30, 14:45 -> Todos caen en la cubeta de las 14:00
     const bucket = Math.floor(tsRaw / intervalMs) * intervalMs;
 
     if (!grouped[bucket]) {
@@ -54,66 +104,74 @@ export const downsampleData = (
     grouped[bucket].push(val);
   });
 
-  // Ordenamos cronológicamente
   timestamps.sort((a, b) => a - b);
 
-  // Generamos el array reducido
   return timestamps.map((ts) => {
+    const values = grouped[ts];
+    let min = values[0];
+    let max = values[0];
+    for (let i = 1; i < values.length; i++) {
+      if (values[i] < min) min = values[i];
+      if (values[i] > max) max = values[i];
+    }
     return {
-      timestamp: ts, // Usamos el inicio del intervalo como marca de tiempo
-      value: calculateMedian(grouped[ts]), // El valor es la MEDIANA de ese periodo
-      originalCount: grouped[ts].length, // (Debug) Cuántos puntos reales formaron este punto
+      timestamp: ts,
+      value: calculateMedian(values),
+      min,
+      max,
+      originalCount: values.length,
     };
   });
 };
 
-// --- RELLENO DE HUECOS (MODO UNIR SIEMPRE) ---
-// Rellena huecos de tiempo vacíos para que la gráfica no corte la línea
+/**
+ * Rellena huecos de tiempo para que el eje X cubra SIEMPRE el rango
+ * completo seleccionado por el usuario, no solo el tramo donde hay
+ * datos reales.
+ *
+ * - Huecos DESPUÉS de haber visto datos reales: se rellenan con el
+ *   último valor conocido (línea plana hacia adelante), como ya se
+ *   hacía.
+ * - Huecos ANTES del primer dato real (ej: el usuario pidió un rango
+ *   que arranca antes de que el sensor tuviera registros): ahora
+ *   también se rellenan, con el PRIMER valor conocido (línea plana
+ *   hacia atrás). Antes esto no pasaba, y el gráfico arrancaba recién
+ *   donde había datos, "comprimiendo" visualmente todo el rango vacío.
+ */
 export const fillTimeGaps = (
   data: any[],
   intervalMs: number,
   startDate: Date,
-  endDate: Date
+  endDate: Date,
 ): any[] => {
-  // Si no hay datos, devolvemos vacío.
   if (!data || data.length === 0) return [];
 
   const filledData: any[] = [];
   const dataMap = new Map<number, any>();
-  
-  // 1. Encontrar el último timestamp REAL
-  // Esto nos sirve para saber cuándo dejar de dibujar la línea plana.
+
   let maxRealTs = 0;
-  
   data.forEach((item) => {
-      dataMap.set(item.timestamp, item);
-      if (item.timestamp > maxRealTs) maxRealTs = item.timestamp;
+    dataMap.set(item.timestamp, item);
+    if (item.timestamp > maxRealTs) maxRealTs = item.timestamp;
   });
 
-  // Alineación a la grilla
+  // data ya viene ordenada ascendente desde downsampleData.
+  const firstKnownValue = data.length > 0 ? Number(data[0].value) : null;
+
   const startTs = Math.floor(startDate.getTime() / intervalMs) * intervalMs;
-  // El fin teórico es lo que eligió el usuario...
   const endTs = Math.ceil(endDate.getTime() / intervalMs) * intervalMs;
 
   let currentTs = startTs;
   let lastKnownValue: number | null = null;
-  
-  // 2. MARGEN DE CORTE: 
-  // Permitimos que la gráfica siga solo 1 intervalo después del último dato real.
-  // Así se ve el final claramente sin esa línea larga.
-  const CUTOFF_THRESHOLD = maxRealTs + intervalMs; 
+
+  const CUTOFF_THRESHOLD = maxRealTs + intervalMs;
 
   while (currentTs <= endTs) {
-    
-    // --- NUEVA LÓGICA DE CORTE ---
-    // Si ya pasamos el último dato real y superamos el margen, CORTAMOS.
-    // Esto evita que la gráfica dibuje una línea plana hasta el futuro.
     if (lastKnownValue !== null && currentTs > CUTOFF_THRESHOLD) {
-        break; 
+      break;
     }
 
     if (dataMap.has(currentTs)) {
-      // --- DATO REAL ---
       const item = dataMap.get(currentTs);
       filledData.push({
         ...item,
@@ -121,31 +179,43 @@ export const fillTimeGaps = (
         isInterpolated: false,
       });
       lastKnownValue = Number(item.value);
-    } else {
-      // --- HUECO ---
-      if (lastKnownValue !== null) {
-        filledData.push({
-          timestamp: currentTs,
-          value: lastKnownValue, // Mantiene valor anterior
-          label: "",
-          hideDataPoint: true,
-          dataPointRadius: 0,
-          stripHeight: 0,
-          isInterpolated: true,
-        });
-      }
+    } else if (lastKnownValue !== null) {
+      filledData.push({
+        timestamp: currentTs,
+        value: lastKnownValue,
+        min: lastKnownValue,
+        max: lastKnownValue,
+        label: "",
+        hideDataPoint: true,
+        dataPointRadius: 0,
+        stripHeight: 0,
+        isInterpolated: true,
+      });
+    } else if (firstKnownValue !== null) {
+      filledData.push({
+        timestamp: currentTs,
+        value: firstKnownValue,
+        min: firstKnownValue,
+        max: firstKnownValue,
+        label: "",
+        hideDataPoint: true,
+        dataPointRadius: 0,
+        stripHeight: 0,
+        isInterpolated: true,
+      });
     }
+    // Si no hay ni lastKnownValue ni firstKnownValue (no hay NINGÚN
+    // dato real en todo el dataset), no se agrega nada.
+
     currentTs += intervalMs;
   }
 
   return filledData;
 };
 
-// --- PARSER DE FECHAS SEGURO (SOLUCIÓN A FECHAS EXCEL Y DB) ---
 const parseSensorTimestamp = (dateStr: string): number | null => {
   try {
     const clean = dateStr.replace(/["']/g, "").trim();
-    // Detectar si es ISO o formato custom
     if (clean.includes("T")) return new Date(clean).getTime();
 
     const [datePart, timePart] = clean.split(" ");
@@ -159,7 +229,7 @@ const parseSensorTimestamp = (dateStr: string): number | null => {
     if (dateSeps.length < 3 || timeSeps.length < 2) return null;
 
     let year = parseInt(dateSeps[0]);
-    if (year < 100) year += 2000; // Fix año 2 digitos
+    if (year < 100) year += 2000;
     const month = parseInt(dateSeps[1]) - 1;
     const day = parseInt(dateSeps[2]);
 
@@ -173,10 +243,9 @@ const parseSensorTimestamp = (dateStr: string): number | null => {
   }
 };
 
-// --- PARSER CSV CENTRALIZADO ---
 export const parseSensorCSV = (
   fileContent: string,
-  sensorType: string
+  sensorType: string,
 ): any[] => {
   const cleanText = fileContent
     .replace(/SIZE=\d+/g, "")
@@ -220,83 +289,78 @@ export const parseSensorCSV = (
   return results.sort((a, b) => a.timestamp - b.timestamp);
 };
 
-// --- FORMATO EXCEL 24H CORRECTO ---
 export const formatForExcel = (ts: number | string | Date): string => {
   const d = new Date(ts);
   const pad = (n: number) => n.toString().padStart(2, "0");
-  // Forzamos formato DD/MM/YYYY HH:mm (24 horas)
   return `${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear()} ${pad(
-    d.getHours()
+    d.getHours(),
   )}:${pad(d.getMinutes())}`;
 };
 
 /**
- * Formatea los datos para el gráfico (GiftedCharts).
- * Maneja la lógica visual de etiquetas: Hora siempre, Fecha abajo solo al cambiar de día.
+ * Anota cada punto con hourLabel/dateLabel (texto candidato), SIN
+ * decidir cuáles se muestran ni cuándo repetir la fecha — esa
+ * decisión ahora vive en SensorChart, en el mismo lugar donde se
+ * decide qué puntos son visibles según el ancho de pantalla. Antes
+ * esa decisión estaba partida entre acá y SensorChart, y un cambio de
+ * día que cayera en un punto "invisible" se perdía para siempre.
  */
-/**
- * Formatea los datos para GiftedCharts.
- * @param arr Datos rellenados
- * @param format Formato de fecha
- * @param labelStep CADA CUANTOS puntos mostrar la etiqueta (evita superposición)
- */
-export const formatChartData = (arr: any[], format: string, labelStep: number = 1) => {
-    if (!arr || arr.length === 0) return [];
-    
-    // Variable para recordar la fecha del punto anterior
-    let lastDateStr = ""; 
-  
-    return arr.map((p, index) => {
-      // 1. Huecos
-      if (p.hideDataPoint) {
-          return { value: p.value, label: "", hideDataPoint: true, dataPointRadius: 0, stripHeight: 0 };
-      }
-      
-      const val = Number(p.value);
-      if (isNaN(val)) return { value: 0, label: "" };
-      
-      const d = new Date(p.timestamp);
-      let label = "";
-      
-      // 2. Control de densidad de etiquetas (Zoom)
-      const shouldShowLabel = (index % labelStep === 0) || (index === arr.length - 1);
+export const formatChartData = (
+  arr: any[],
+  format: ChartLabelFormat | string,
+) => {
+  if (!arr || arr.length === 0) return [];
 
-      if (shouldShowLabel) {
-          // --- FORMATO: HORA O DÍA-HORA ---
-          if (format === 'hour' || format === 'day-hour') {
-              // Formato corto de hora: "08:00" o "8am" según prefieras
-              const timeStr = d.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}); 
-              const dateStr = `${d.getDate()}/${d.getMonth() + 1}`; 
-    
-              // LÓGICA DE LIMPIEZA:
-              // Solo mostramos la fecha si CAMBIÓ respecto al punto anterior.
-              // Esto hace que veas: "00:00", "08:00", "16:00" (limpios)
-              // Y cuando cambie el día: "00:00 \n 17/01"
-              if (dateStr !== lastDateStr) {
-                  label = `${timeStr}\n${dateStr}`; 
-                  lastDateStr = dateStr; 
-              } else {
-                  // Si es el mismo día, SOLO mostramos la hora
-                  label = timeStr; 
-              }
-          } 
-          // --- FORMATO: SOLO FECHA (Zoom lejano > 1 mes) ---
-          else {
-              const dateStr = `${d.getDate()}/${d.getMonth() + 1}`;
-              // Evitamos repetir la fecha si el zoom lejano agrupa varios puntos del mismo día
-              if (dateStr !== lastDateStr) {
-                  label = dateStr;
-                  lastDateStr = dateStr;
-              } else {
-                  label = ""; // Si es el mismo día en modo 'date', lo ocultamos para limpiar
-              }
-          }
-      } 
-  
-      return { 
-          value: val, 
-          label,
-          labelTextStyle: { color: '#757575', fontSize: 10, textAlign: 'center' } 
+  return arr.map((p) => {
+    const d = new Date(p.timestamp);
+    const dateLabel =
+      format === "month"
+        ? `${MONTHS_ES[d.getMonth()]}/${String(d.getFullYear()).slice(2)}`
+        : `${d.getDate()}/${d.getMonth() + 1}`;
+    const hourLabel =
+      format === "time"
+        ? d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+        : "";
+
+    if (p.hideDataPoint) {
+      return {
+        value: p.value,
+        min: p.min,
+        max: p.max,
+        label: "",
+        hideDataPoint: true,
+        dataPointRadius: 0,
+        stripHeight: 0,
+        timestamp: p.timestamp,
+        isInterpolated: true,
+        hourLabel,
+        dateLabel,
       };
-    });
+    }
+
+    const val = Number(p.value);
+    if (isNaN(val)) {
+      return {
+        value: 0,
+        min: 0,
+        max: 0,
+        label: "",
+        timestamp: p.timestamp,
+        isInterpolated: false,
+        hourLabel: "",
+        dateLabel: "",
+      };
+    }
+
+    return {
+      value: val,
+      min: typeof p.min === "number" && !isNaN(p.min) ? p.min : val,
+      max: typeof p.max === "number" && !isNaN(p.max) ? p.max : val,
+      label: "",
+      timestamp: p.timestamp,
+      isInterpolated: false,
+      hourLabel,
+      dateLabel,
+    };
+  });
 };

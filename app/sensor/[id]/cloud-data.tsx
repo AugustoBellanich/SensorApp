@@ -1,6 +1,5 @@
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import DateTimePicker from "@react-native-community/datetimepicker";
-import Slider from "@react-native-community/slider";
 // @ts-ignore
 import * as FileSystem from "expo-file-system/legacy";
 import { Stack, useLocalSearchParams, useRouter } from "expo-router";
@@ -35,14 +34,13 @@ import {
 } from "../../../database/types";
 
 // Utils
-import { calculateMoistureFromSegments } from "../../../utils/calibration";
-// FUNCIONES OPTIMIZADAS
 import {
   calculateMedian,
   downsampleData,
   fillTimeGaps,
   formatChartData,
   formatForExcel,
+  getOptimalInterval,
 } from "../../../utils/dataProcessing";
 import { getAgronomicLines } from "../../../utils/referenceLines";
 
@@ -50,7 +48,6 @@ import { getAgronomicLines } from "../../../utils/referenceLines";
 import { supabase } from "../../../lib/supabase";
 
 type UnitType = "% Hv" | "% Hg" | "mV";
-type ViewMode = "optimized" | "real";
 
 // --- CONSTANTES AGRONÓMICAS ---
 const CLIMATE_LINES = [
@@ -70,21 +67,13 @@ export default function CloudDataScreen() {
   const [loadingMessage, setLoadingMessage] = useState("");
   const [sensorDb, setSensorDb] = useState<SensorEntity | null>(null);
 
-  // Filtros Fecha (Default 7 días)
-  const [dateStart, setDateStart] = useState(new Date());
+  // Filtros Fecha (dateStart inicia vacío, dateEnd en hoy)
+  const [dateStart, setDateStart] = useState<Date | null>(null);
   const [dateEnd, setDateEnd] = useState(new Date());
   const [showPicker, setShowPicker] = useState<"start" | "end" | null>(null);
 
   // Configs Visualización
-  const [viewMode, setViewMode] = useState<ViewMode>("optimized");
   const [unit, setUnit] = useState<UnitType>("% Hv");
-  const [spacing, setSpacing] = useState<number>(40);
-
-  // CONFIGURACIÓN DINÁMICA DEL GRÁFICO
-  const [chartSettings, setChartSettings] = useState({
-    intervalMs: 3600000,
-    labelFormat: "hour", // 'hour' | 'day-hour' | 'day' | 'date'
-  });
 
   // Configuración de Electrodos
   const [electrodesInfo, setElectrodesInfo] = useState<
@@ -93,8 +82,6 @@ export default function CloudDataScreen() {
   const [electrodeConfig, setElectrodeConfig] = useState<
     Record<number, LinearSegment[]>
   >({});
-  const [densities, setDensities] = useState<Record<number, number>>({});
-  const [isConfigLoaded, setIsConfigLoaded] = useState(false);
 
   // Datos
   const [cloudData, setCloudData] = useState<any[]>([]);
@@ -115,7 +102,6 @@ export default function CloudDataScreen() {
         const elecs = await getElectrodesBySensor(sensorId);
         const infoMap: Record<number, ElectrodeEntity> = {};
         const configMap: Record<number, LinearSegment[]> = {};
-        const densityMap: Record<number, number> = {};
 
         elecs.forEach((e) => {
           infoMap[e.electrode_index] = e;
@@ -124,83 +110,27 @@ export default function CloudDataScreen() {
               configMap[e.electrode_index] = JSON.parse(e.equations_json);
             } catch {}
           }
-          densityMap[e.electrode_index] =
-            e.density && e.density > 0 ? e.density : 1.3;
         });
         setElectrodesInfo(infoMap);
         setElectrodeConfig(configMap);
-        setDensities(densityMap);
       }
-      setIsConfigLoaded(true);
     };
     loadConfig();
   }, [sensorId]);
 
-  // Helper para calcular el "step" de etiquetas basado en el zoom (spacing)
-  // Cuanto MENOR es el spacing (zoom out), MAYOR es el salto para que no se encimen.
-  const getLabelStep = (currentSpacing: number) => {
-    if (currentSpacing < 10) return 10; // Muy lejos: muestra 1 de cada 10
-    if (currentSpacing < 20) return 6;
-    if (currentSpacing < 35) return 3;
-    if (currentSpacing < 50) return 2;
-    return 1; // Cerca: muestra todas
-  };
-
-  // --- LÓGICA DE OPTIMIZACIÓN DE DATOS (Igual a SD/Local) ---
- const optimizeChartSettings = (rawData: any[], startDate: Date, endDate: Date) => {
-    const minTs = startDate.getTime();
-    const maxTs = endDate.getTime();
-    const totalDurationMs = maxTs - minTs;
-    const diffHours = totalDurationMs / (1000 * 60 * 60);
-
-    // ... (tus constantes MIN_5, MIN_10, etc. siguen igual) ...
-    const MIN_30 = 30 * 60 * 1000;
-    const HOUR_1 = 60 * 60 * 1000;
-    const HOUR_4 = 4 * HOUR_1;
-    const HOUR_8 = 8 * HOUR_1;
-    const HOUR_12 = 12 * HOUR_1;
-
-    let finalInterval = HOUR_1;
-    let labelFmt = 'hour';
-
-    if (diffHours <= 24) {
-        finalInterval = 10 * 60 * 1000; // 10 min
-        labelFmt = 'hour'; 
-    } else if (diffHours <= 72) { // 3 días
-        finalInterval = MIN_30;
-        labelFmt = 'day-hour'; 
-    } else if (diffHours <= 360) { // 15 días
-        finalInterval = HOUR_4; 
-        labelFmt = 'day-hour'; 
-    } else if (diffHours <= 720) { // 30 días (1 Mes)
-        // ANTES: finalInterval = HOUR_12; labelFmt = 'date';
-        // AHORA: 8 Horas (3 puntos por día) y mostramos HORA
-        finalInterval = HOUR_8; 
-        labelFmt = 'day-hour'; // <--- CLAVE: Activamos hora para el mes completo
-    } else {
-        // Más de 1 mes
-        finalInterval = 24 * HOUR_1; // 1 punto diario
-        labelFmt = 'date'; // Aquí sí, solo fecha
-    }
-
-    return { intervalMs: finalInterval, labelFormat: labelFmt };
-};
-
   const calcStats = useCallback((arr: any[]) => {
     if (!arr.length) return { min: 0, max: 0, avg: 0 };
     const vals = arr.map((d) => Number(d.value) || 0);
-    return {
-      min: Math.min(...vals),
-      max: Math.max(...vals),
-      avg: calculateMedian(vals),
-    };
+    const min = vals.reduce((m, v) => (v < m ? v : m), vals[0]);
+    const max = vals.reduce((m, v) => (v > m ? v : m), vals[0]);
+    return { min, max, avg: calculateMedian(vals) };
   }, []);
 
   // --- PROCESAMIENTO B01 ---
   const processB01 = useCallback(
     (data: any[]) => {
+      if (!dateStart) return;
       // 1. NORMALIZACIÓN DE FECHAS (Corrección del error de 1 día)
-      // Creamos copias locales para no mutar el estado y forzamos el rango completo
       const rangeStart = new Date(dateStart);
       rangeStart.setHours(0, 0, 0, 0);
 
@@ -208,35 +138,28 @@ export default function CloudDataScreen() {
       rangeEnd.setHours(23, 59, 59, 999);
 
       // 2. Configuración Óptima usando el rango expandido
-      const settings = optimizeChartSettings(data, rangeStart, rangeEnd);
-      setChartSettings(settings);
+      const settings = getOptimalInterval(rangeStart, rangeEnd);
       const { intervalMs, labelFormat } = settings;
 
-      // 3. Procesamiento de valores (Conversión mV -> Hv)
+      // 3. Selección de valores YA CALCULADOS por el trigger en Supabase
       const processed = data.map((d) => {
-        const mv1 = Number(d.e1_mv);
-        const mv2 = Number(d.e2_mv);
-        const mv3 = Number(d.e3_mv);
-        let v1 = mv1, v2 = mv2, v3 = mv3;
+        let v1, v2, v3;
 
-        if (unit !== "mV") {
-          const rho1 = electrodesInfo[1]?.density || 1.3;
-          const rho2 = electrodesInfo[2]?.density || 1.3;
-          const rho3 = electrodesInfo[3]?.density || 1.3;
-
-          if (electrodeConfig[1])
-            v1 = calculateMoistureFromSegments(mv1, electrodeConfig[1]);
-          if (electrodeConfig[2])
-            v2 = calculateMoistureFromSegments(mv2, electrodeConfig[2]);
-          if (electrodeConfig[3])
-            v3 = calculateMoistureFromSegments(mv3, electrodeConfig[3]);
-
-          if (unit === "% Hg") {
-            v1 /= rho1;
-            v2 /= rho2;
-            v3 /= rho3;
-          }
+        if (unit === "mV") {
+          v1 = Number(d.e1_mv);
+          v2 = Number(d.e2_mv);
+          v3 = Number(d.e3_mv);
+        } else if (unit === "% Hg") {
+          v1 = Number(d.e1_hg);
+          v2 = Number(d.e2_hg);
+          v3 = Number(d.e3_hg);
+        } else {
+          // "% Hv"
+          v1 = Number(d.e1_hv);
+          v2 = Number(d.e2_hv);
+          v3 = Number(d.e3_hv);
         }
+
         return { ...d, v1, v2, v3 };
       });
 
@@ -244,68 +167,40 @@ export default function CloudDataScreen() {
       const startMs = rangeStart.getTime();
       const endMs = rangeEnd.getTime();
 
-      // Ajustamos al "bucket" más cercano para que las líneas verticales cuadren
       const gridStart = new Date(Math.floor(startMs / intervalMs) * intervalMs);
       const gridEnd = new Date(Math.ceil(endMs / intervalMs) * intervalMs);
 
       const prep = (key: string) => {
-        let finalData;
-        let stats;
-
-        // Filtramos datos inválidos
         const validData = processed.filter((p) => {
           const v = p[key];
           return v !== undefined && v !== null && !isNaN(v) && v > 0;
         });
 
-        if (viewMode === "optimized") {
-          // A. Agrupar datos (promedios por intervalo)
-          const downsampled = downsampleData(validData, key, intervalMs);
-          stats = calcStats(downsampled);
+        // Siempre agrupamos por intervalo: mediana como línea central +
+        // min/max del bucket para la banda de variación.
+        const downsampled = downsampleData(validData, key, intervalMs);
+        const stats = calcStats(downsampled);
+        const filled = fillTimeGaps(
+          downsampled,
+          intervalMs,
+          gridStart,
+          gridEnd,
+        );
+        const finalData = formatChartData(filled, labelFormat);
 
-          // B. Rellenar huecos usando el inicio y fin EXPANDIDOS
-          const filled = fillTimeGaps(
-            downsampled,
-            intervalMs,
-            gridStart,
-            gridEnd
-          );
-
-          // C. Formatear etiquetas
-          const step = getLabelStep(spacing);
-          finalData = formatChartData(filled, labelFormat, step);
-        } else {
-          // Modo Real: Mostramos todo sin agrupar
-          const step = getLabelStep(spacing);
-          const mapped = validData.map((p) => ({
-            timestamp: p.timestamp,
-            value: p[key],
-          }));
-          finalData = formatChartData(mapped, "hour", step);
-          stats = calcStats(mapped);
-        }
         return { data: finalData, stats };
       };
 
       setElectrodesData({ 1: prep("v1"), 2: prep("v2"), 3: prep("v3") });
       setSoilTempData(prep("soil_temp"));
     },
-    // Dependencias
-    [
-      unit,
-      electrodesInfo,
-      electrodeConfig,
-      calcStats,
-      viewMode,
-      dateStart,
-      dateEnd,
-      spacing,
-    ]
+    [unit, calcStats, dateStart, dateEnd],
   );
 
   // --- PROCESAMIENTO C01 ---
   const processC01 = useCallback(
     (data: any[]) => {
+      if (!dateStart) return;
       // 1. NORMALIZACIÓN DE FECHAS
       const rangeStart = new Date(dateStart);
       rangeStart.setHours(0, 0, 0, 0);
@@ -313,14 +208,14 @@ export default function CloudDataScreen() {
       const rangeEnd = new Date(dateEnd);
       rangeEnd.setHours(23, 59, 59, 999);
 
-      // Estadísticas Agronómicas (esto usa data cruda, no afecta el bug gráfico pero es correcto usarlo así)
+      // Estadísticas Agronómicas (sobre datos crudos)
       let chill = 0,
         frost = 0,
         heat = 0;
 
       const sorted = [...data].sort(
         (a, b) =>
-          new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
+          new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime(),
       );
 
       for (let i = 1; i < sorted.length; i++) {
@@ -345,8 +240,7 @@ export default function CloudDataScreen() {
       });
 
       // 2. Gráficos - Configuración Óptima con fechas expandidas
-      const settings = optimizeChartSettings(data, rangeStart, rangeEnd);
-      setChartSettings(settings);
+      const settings = getOptimalInterval(rangeStart, rangeEnd);
       const { intervalMs, labelFormat } = settings;
 
       // 3. Definición de la Grilla Temporal
@@ -357,41 +251,27 @@ export default function CloudDataScreen() {
       const gridEnd = new Date(Math.ceil(endMs / intervalMs) * intervalMs);
 
       const prep = (key: string) => {
-        let finalData;
-        let stats;
-
         const validData = data.filter((p) => {
           const v = p[key];
-          return (
-            v !== undefined && v !== null && !isNaN(v) && v > -50
-          ); // Permitir temp negativa
+          return v !== undefined && v !== null && !isNaN(v) && v > -50; // Permitir temp negativa
         });
 
-        if (viewMode === "optimized") {
-          const downsampled = downsampleData(validData, key, intervalMs);
-          stats = calcStats(downsampled);
-          // Rellenar huecos respetando el rango expandido
-          const filled = fillTimeGaps(
-            downsampled,
-            intervalMs,
-            gridStart,
-            gridEnd
-          );
-          finalData = formatChartData(filled, labelFormat);
-        } else {
-          const mapped = validData.map((p) => ({
-            timestamp: p.timestamp,
-            value: p[key],
-          }));
-          finalData = formatChartData(mapped, "hour");
-          stats = calcStats(mapped);
-        }
+        const downsampled = downsampleData(validData, key, intervalMs);
+        const stats = calcStats(downsampled);
+        const filled = fillTimeGaps(
+          downsampled,
+          intervalMs,
+          gridStart,
+          gridEnd,
+        );
+        const finalData = formatChartData(filled, labelFormat);
+
         return { data: finalData, stats };
       };
 
       setClimateData({ temp: prep("air_temp"), hum: prep("humidity") });
     },
-    [calcStats, viewMode, dateStart, dateEnd]
+    [calcStats, dateStart, dateEnd],
   );
 
   const processData = useCallback(
@@ -404,98 +284,76 @@ export default function CloudDataScreen() {
         setLoading(false);
       }, 50);
     },
-    [processB01, processC01]
+    [processB01, processC01],
   );
 
   // --- CONSULTA A SUPABASE ---
   const handleSearchData = useCallback(
     async (sensor: SensorEntity, start: Date, end: Date) => {
-      // Validaciones iniciales
       if (sensor.type !== "B01" && sensor.type !== "C01") return;
-      
+
       setLoading(true);
       setLoadingMessage("Descargando historial completo...");
-      
-      try {
-        const s = new Date(start); s.setHours(0, 0, 0, 0);
-        const e = new Date(end); e.setHours(23, 59, 59, 999);
-        const type = sensor.type as "B01" | "C01";
-        const tableName = type === 'B01' ? 'readings_b01' : 'readings_c01';
 
-        // --- BUCLE DE PAGINACIÓN ---
+      try {
+        const s = new Date(start);
+        s.setHours(0, 0, 0, 0);
+        const e = new Date(end);
+        e.setHours(23, 59, 59, 999);
+        const type = sensor.type as "B01" | "C01";
+        const tableName = type === "B01" ? "readings_b01" : "readings_c01";
+
         let allData: any[] = [];
         let from = 0;
-        const PAGE_SIZE = 1000; // Pedimos el máximo que permite tu Supabase actual
+        const PAGE_SIZE = 1000;
         let fetchMore = true;
 
-        console.log(`[CLOUD] Iniciando descarga paginada para ${sensorId}...`);
-
         while (fetchMore) {
-            // Usamos .range() para pedir: "dame del 0 al 999", luego "del 1000 al 1999", etc.
-            const { data, error } = await supabase
-                .from(tableName)
-                .select('*')
-                // IMPORTANTE: Usa el nombre correcto de columna (sensor_id o device_id)
-                // Según tu log parece ser 'sensor_id'
-                .eq('sensor_id', sensorId) 
-                .gte('timestamp', s.toISOString())
-                .lte('timestamp', e.toISOString())
-                .order('timestamp', { ascending: true })
-                .range(from, from + PAGE_SIZE - 1); // 
+          const { data, error } = await supabase
+            .from(tableName)
+            .select("*")
+            .eq("sensor_id", sensorId)
+            .gte("timestamp", s.toISOString())
+            .lte("timestamp", e.toISOString())
+            .order("timestamp", { ascending: true })
+            .range(from, from + PAGE_SIZE - 1);
 
-            if (error) throw error;
+          if (error) throw error;
 
-            if (data && data.length > 0) {
-                allData = [...allData, ...data];
-                from += PAGE_SIZE;
-                
-                console.log(`[CLOUD] Recibidos ${data.length} registros (Total: ${allData.length})`);
-
-                // Si recibimos menos de 1000, es que ya no hay más datos
-                if (data.length < PAGE_SIZE) {
-                    fetchMore = false;
-                }
-            } else {
-                fetchMore = false; // No llegaron datos, terminamos
-            }
+          if (data && data.length > 0) {
+            allData = [...allData, ...data];
+            from += PAGE_SIZE;
+            if (data.length < PAGE_SIZE) fetchMore = false;
+          } else {
+            fetchMore = false;
+          }
         }
-        
-        console.log(`[CLOUD] ✅ Descarga finalizada: ${allData.length} registros.`);
 
+        // SOLO guardamos la data. El useEffect se encargará de graficar.
         if (allData.length > 0) {
           setCloudData(allData);
-          processData(allData, type);
         } else {
           setCloudData([]);
-          Alert.alert("Aviso", "No se encontraron datos en la nube para este periodo.");
+          Alert.alert(
+            "Aviso",
+            "No se encontraron datos en la nube para este periodo.",
+          );
         }
-      } catch (err: any) {
-        console.error("Error descarga:", err);
+      } catch {
         Alert.alert("Error", "Falló la descarga de datos.");
       } finally {
         setLoading(false);
       }
     },
-    [sensorId, processData]
+    [sensorId],
   );
 
   useEffect(() => {
-    if (cloudData.length > 0 && sensorDb) {
-        // Límite seguro para 'Real Data' en Android (aprox 1000-1500 puntos)
-        const CRASH_LIMIT = 1500; 
-
-        if (viewMode === 'real' && cloudData.length > CRASH_LIMIT) {
-            Alert.alert(
-                "Demasiados Datos",
-                `Hay ${cloudData.length} puntos. Se activó el modo Optimizado para evitar que la app se cierre. Selecciona un rango de fechas menor para ver datos crudos.`
-            );
-            setViewMode('optimized'); // <--- Forzamos cambio a optimizado
-            return; // Cortamos ejecución para que no intente graficar
-        }
-
-        processData(cloudData, sensorDb.type as "B01" | "C01");
+    // Escucha automáticamente cuando llega data nueva
+    if (cloudData.length > 0 && sensorDb && dateStart) {
+      processData(cloudData, sensorDb.type as "B01" | "C01");
     }
-  }, [unit, viewMode, cloudData, sensorDb, processData]);
+  }, [unit, cloudData, sensorDb, processData, dateStart]);
 
   // --- EXPORTAR EXCEL ---
   const handleExportExcel = async () => {
@@ -514,12 +372,9 @@ export default function CloudDataScreen() {
         if (isB01) {
           row["Temp. Suelo"] = item.soil_temp;
           [1, 2, 3].forEach((idx) => {
-            const mv = item[`e${idx}_mv`];
-            row[`E${idx} mV`] = mv;
-            const segs = electrodeConfig[idx];
-            let hv = 0;
-            if (segs) hv = calculateMoistureFromSegments(mv, segs);
-            row[`E${idx} Hv`] = Number(hv.toFixed(2));
+            row[`E${idx} mV`] = item[`e${idx}_mv`];
+            row[`E${idx} Hv`] = item[`e${idx}_hv`];
+            row[`E${idx} Hg`] = item[`e${idx}_hg`];
           });
         } else {
           row["Temp"] = item.air_temp;
@@ -550,12 +405,33 @@ export default function CloudDataScreen() {
     const type = showPicker;
     setShowPicker(null);
     if (event.type === "dismissed" || !selectedDate) return;
+
+    let newStart = dateStart;
+    let newEnd = dateEnd;
+
     if (type === "start") {
-      setDateStart(selectedDate);
-      if (selectedDate > dateEnd) setDateEnd(selectedDate);
+      newStart = selectedDate;
+      if (newStart > newEnd) newEnd = newStart;
     } else {
-      if (selectedDate < dateStart) Alert.alert("Error", "Fecha inválida");
-      else setDateEnd(selectedDate);
+      if (dateStart && selectedDate < dateStart) {
+        Alert.alert("Error", "La fecha 'Hasta' no puede ser menor a 'Desde'");
+        return;
+      }
+      newEnd = selectedDate;
+    }
+
+    setDateStart(newStart);
+    setDateEnd(newEnd);
+
+    // Limpiar gráficos y datos viejos al instante para que la UI no se deforme
+    setCloudData([]);
+    setElectrodesData(null);
+    setSoilTempData(null);
+    setClimateData(null);
+
+    // Si tenemos ambas fechas (y el sensor cargó), buscar automáticamente
+    if (newStart && newEnd && sensorDb) {
+      handleSearchData(sensorDb, newStart, newEnd);
     }
   };
 
@@ -591,17 +467,20 @@ export default function CloudDataScreen() {
       >
         {/* Filtros */}
         <View style={styles.filterCard}>
-          <View style={styles.dateRow}>
+          {/* Le quitamos el marginBottom: 15 que tenía porque ya no hay botón abajo */}
+          <View style={[styles.dateRow, { marginBottom: 0 }]}>
             <TouchableOpacity
               style={styles.dateBtn}
               onPress={() => setShowPicker("start")}
             >
               <Text style={styles.dateLabel}>Desde</Text>
               <Text style={styles.dateVal}>
-                {dateStart.toLocaleDateString()}
+                {dateStart ? dateStart.toLocaleDateString() : "Seleccionar..."}
               </Text>
             </TouchableOpacity>
+
             <MaterialCommunityIcons name="arrow-right" size={20} color="#ccc" />
+
             <TouchableOpacity
               style={styles.dateBtn}
               onPress={() => setShowPicker("end")}
@@ -610,22 +489,8 @@ export default function CloudDataScreen() {
               <Text style={styles.dateVal}>{dateEnd.toLocaleDateString()}</Text>
             </TouchableOpacity>
           </View>
-          <TouchableOpacity
-            style={styles.searchButton}
-            onPress={() =>
-              sensorDb && handleSearchData(sensorDb, dateStart, dateEnd)
-            }
-            disabled={loading}
-          >
-            <>
-              <MaterialCommunityIcons
-                name="cloud-search"
-                size={24}
-                color="#fff"
-              />
-              <Text style={styles.searchBtnText}>Consultar Nube</Text>
-            </>
-          </TouchableOpacity>
+
+          {/* ELIMINA POR COMPLETO el <TouchableOpacity style={styles.searchButton}> que estaba acá */}
         </View>
 
         {/* Toolbar */}
@@ -649,91 +514,15 @@ export default function CloudDataScreen() {
         )}
 
         {/* Controles Visualización */}
-        {cloudData.length > 0 && (
+        {cloudData.length > 0 && sensorDb?.type === "B01" && (
           <View style={styles.controlsContainer}>
-            {sensorDb?.type === "B01" && (
-              <View style={{ marginBottom: 15 }}>
-                <SegmentedControl
-                  options={["% Hv", "% Hg", "mV"]}
-                  selectedIndex={unit === "% Hv" ? 0 : unit === "% Hg" ? 1 : 2}
-                  onChange={(i) =>
-                    setUnit(i === 0 ? "% Hv" : i === 1 ? "% Hg" : "mV")
-                  }
-                />
-              </View>
-            )}
-
-            <View style={styles.switchContainer}>
-              <TouchableOpacity
-                style={[
-                  styles.switchOption,
-                  viewMode === "optimized" && styles.switchActive,
-                ]}
-                onPress={() => setViewMode("optimized")}
-              >
-                <MaterialCommunityIcons
-                  name="chart-bell-curve-cumulative"
-                  size={18}
-                  color={viewMode === "optimized" ? "#fff" : "#666"}
-                />
-                <Text
-                  style={[
-                    styles.switchText,
-                    viewMode === "optimized" && styles.switchTextActive,
-                  ]}
-                >
-                  Optimizado
-                </Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[
-                  styles.switchOption,
-                  viewMode === "real" && styles.switchActive,
-                ]}
-                onPress={() => setViewMode("real")}
-              >
-                <MaterialCommunityIcons
-                  name="chart-line-variant"
-                  size={18}
-                  color={viewMode === "real" ? "#fff" : "#666"}
-                />
-                <Text
-                  style={[
-                    styles.switchText,
-                    viewMode === "real" && styles.switchTextActive,
-                  ]}
-                >
-                  Datos Reales
-                </Text>
-              </TouchableOpacity>
-            </View>
-
-            <View style={styles.sliderContainer}>
-              <View style={styles.sliderLabels}>
-                <MaterialCommunityIcons
-                  name="magnify-minus-outline"
-                  size={20}
-                  color={Colors.textSecondary}
-                />
-                <Text style={styles.sliderText}>Zoom</Text>
-                <MaterialCommunityIcons
-                  name="magnify-plus-outline"
-                  size={20}
-                  color={Colors.textSecondary}
-                />
-              </View>
-              <Slider
-                style={{ width: "100%", height: 40 }}
-                minimumValue={5}
-                maximumValue={80}
-                step={5}
-                value={spacing}
-                onValueChange={setSpacing}
-                minimumTrackTintColor={Colors.primary}
-                maximumTrackTintColor="#d3d3d3"
-                thumbTintColor={Colors.primary}
-              />
-            </View>
+            <SegmentedControl
+              options={["% Hv", "% Hg", "mV"]}
+              selectedIndex={unit === "% Hv" ? 0 : unit === "% Hg" ? 1 : 2}
+              onChange={(i) =>
+                setUnit(i === 0 ? "% Hv" : i === 1 ? "% Hg" : "mV")
+              }
+            />
           </View>
         )}
 
@@ -798,7 +587,6 @@ export default function CloudDataScreen() {
                   type="line"
                   unit="°C"
                   color={Colors.secondary}
-                  spacing={spacing}
                 />
               </View>
             )}
@@ -820,7 +608,6 @@ export default function CloudDataScreen() {
                     unit={unit}
                     color={Colors.primary}
                     referenceLines={refLines}
-                    spacing={spacing}
                     yAxisMax={maxY}
                   />
                 </View>
@@ -839,7 +626,6 @@ export default function CloudDataScreen() {
                 type="line"
                 unit="°C"
                 color={Colors.secondary}
-                spacing={spacing}
                 referenceLines={CLIMATE_LINES}
               />
             </View>
@@ -850,7 +636,6 @@ export default function CloudDataScreen() {
                 type="line"
                 unit="%"
                 color={Colors.primary}
-                spacing={spacing}
               />
             </View>
           </View>
@@ -858,7 +643,7 @@ export default function CloudDataScreen() {
 
         {showPicker && (
           <DateTimePicker
-            value={showPicker === "start" ? dateStart : dateEnd}
+            value={showPicker === "start" ? dateStart || new Date() : dateEnd}
             mode="date"
             display="default"
             onChange={onDateChange}
@@ -951,46 +736,6 @@ const styles = StyleSheet.create({
   toolText: { fontWeight: "bold", fontSize: 14 },
 
   controlsContainer: { paddingHorizontal: 16, marginBottom: 15 },
-
-  switchContainer: {
-    flexDirection: "row",
-    backgroundColor: "#e0e0e0",
-    borderRadius: 8,
-    padding: 3,
-    marginBottom: 15,
-  },
-  switchOption: {
-    flex: 1,
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    paddingVertical: 8,
-    borderRadius: 6,
-    gap: 6,
-  },
-  switchActive: {
-    backgroundColor: Colors.primary,
-    shadowColor: "#000",
-    shadowOpacity: 0.1,
-    shadowRadius: 2,
-    elevation: 1,
-  },
-  switchText: { fontSize: 12, fontWeight: "600", color: "#666" },
-  switchTextActive: { color: "#fff" },
-
-  sliderContainer: {
-    backgroundColor: "#fff",
-    padding: 10,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: "#eee",
-  },
-  sliderLabels: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    marginBottom: 5,
-  },
-  sliderText: { fontSize: 12, color: Colors.textSecondary, fontWeight: "600" },
 
   content: { paddingHorizontal: 16 },
   chartBox: { marginBottom: 25 },

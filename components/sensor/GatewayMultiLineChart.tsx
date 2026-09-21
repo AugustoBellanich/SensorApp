@@ -98,6 +98,32 @@ export default function GatewayMultiLineChart({
     rulesColor: "#f0f0f0",
     rulesType: "solid" as const,
     decimalPlaces: decimals,
+    pointerConfig: {
+      pointerStripHeight: 160,
+      pointerStripColor: "#ccc",
+      pointerStripWidth: 2,
+      pointerColor: primary.color,
+      radius: 5,
+      pointerLabelWidth: 130,
+      pointerLabelHeight: series.length > 1 ? 60 : 40,
+      activatePointersOnLongPress: false,
+      autoAdjustPointerLabelPosition: true,
+      pointerLabelComponent: (items: any) => (
+        <View style={styles.tooltipBox}>
+          {items.map((it: any, idx: number) => (
+            <Text
+              key={idx}
+              style={[
+                styles.tooltipValue,
+                { color: series[idx]?.color || "#fff" },
+              ]}
+            >
+              {series[idx]?.label}: {Number(it.value).toFixed(decimals)} {unit}
+            </Text>
+          ))}
+        </View>
+      ),
+    },
   };
 
   return (
@@ -168,4 +194,15 @@ const styles = StyleSheet.create({
   legendItem: { flexDirection: "row", alignItems: "center", gap: 5 },
   legendDot: { width: 8, height: 8, borderRadius: 4 },
   legendText: { fontSize: 11, color: Colors.textSecondary, fontWeight: "600" },
+  tooltipBox: {
+    backgroundColor: "rgba(30,30,30,0.92)",
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 8,
+    alignItems: "flex-start",
+  },
+  tooltipValue: {
+    fontSize: 12,
+    fontWeight: "bold",
+  },
 });
